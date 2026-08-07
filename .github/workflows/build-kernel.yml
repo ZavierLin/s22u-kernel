@@ -22,14 +22,15 @@ jobs:
       - name: 检出内核源码
         uses: actions/checkout@v4
 
-      - name: 配置构建环境
+      - name: 配置构建环境与 ARM64 交叉编译工具链
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             git ccache automake flex bison libssl-dev \
             bc libelf-dev libncurses5-dev libncursesw5-dev \
             zip unzip liblz4-tool u-boot-tools liblzo2-dev \
-            device-tree-compiler python3 python3-pip
+            device-tree-compiler python3 python3-pip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: 获取 AOSP Clang 工具链 (r416183b)
         run: |
@@ -57,30 +58,33 @@ jobs:
           OUT_DIR=$GITHUB_WORKSPACE/out
           mkdir -p $OUT_DIR
 
-          # 自动定位源码所在子目录
+          # 自动寻找内核主目录位置
           if [ -d "kernel_platform/msm-kernel" ]; then
             cd kernel_platform/msm-kernel
           elif [ -d "msm-kernel" ]; then
             cd msm-kernel
+          elif [ -d "kernel" ]; then
+            cd kernel
           fi
 
-          # 生成配置
+          # 1. 生成内核配置
           make O=$OUT_DIR ${{ github.event.inputs.KERNEL_DEFCONFIG }}
 
-          # 开始编译
+          # 2. 执行内核构建，并将日志保存至 build.log
           make O=$OUT_DIR -j$(nproc --all) 2>&1 | tee $GITHUB_WORKSPACE/build.log
 
-          # 验证内核产物
+          # 3. 校验内核编译产物
           if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
             echo "IMAGE_PATH=$OUT_DIR/arch/arm64/boot/Image" >> $GITHUB_ENV
             echo "VMLINUX_PATH=$OUT_DIR/vmlinux" >> $GITHUB_ENV
             echo "CONFIG_PATH=$OUT_DIR/.config" >> $GITHUB_ENV
           else
-            echo "::error::内核编译失败，未找到 Image 文件！"
+            echo "::error::内核编译失败，未在 out 目录找到 Image 文件！"
             exit 1
           fi
 
       - name: 打包 AnyKernel3 Zip 刷机包
+        if: success()
         run: |
           mkdir -p $GITHUB_WORKSPACE/anykernel
           cd $GITHUB_WORKSPACE/anykernel
@@ -88,12 +92,13 @@ jobs:
 
           cp ${{ env.IMAGE_PATH }} ./Image
 
-          # 适配 SM8450 / GKI
+          # 适配 SM8450 / GKI 架构
           sed -i 's/properties()/properties() {\nkernel.string=SM8450 KernelSU Kernel\ndo.devicecheck=0\ndo.modules=0\ndo.systemless=1\ndo.cleanup=1\nis.gki=1\n}/g' anykernel.sh
 
           zip -r9 $GITHUB_WORKSPACE/AnyKernel3-S22U-KSU.zip * -x .git\* README.md
 
-      - name: 保存调试产物到 Artifacts (vmlinux & build.log)
+      - name: 保存调试产物至 Artifacts (vmlinux & build.log)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-artifacts-${{ github.sha }}
@@ -105,10 +110,12 @@ jobs:
 
       - name: 生成 Release 标签
         id: tag
+        if: success()
         run: |
           echo "TAG_NAME=ksu-s22u-$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
 
       - name: 发布 Kernel Release 刷机包
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.TAG_NAME }}

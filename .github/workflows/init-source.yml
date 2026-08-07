@@ -1,0 +1,55 @@
+name: Auto Unpack & Merge Samsung Source
+
+on:
+  workflow_dispatch:
+    inputs:
+      RELEASE_TAG:
+        description: '刚才上传 Zip 的 Release Tag 名称'
+        required: true
+        default: 'v1.0'
+
+jobs:
+  unpack-and-merge:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出当前仓库
+        uses: actions/checkout@v4
+
+      - name: 从 Release 下载两个原始 Zip 文件
+        run: |
+          mkdir -p ./zips
+          gh release download ${{ inputs.RELEASE_TAG }} --pattern "*.zip" --dir ./zips
+          ls -la ./zips
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 在 Linux 云端环境自动解压并覆盖合并
+        run: |
+          mkdir -p src_temp
+          cd src_temp
+          
+          # 1. 解压基线源码包
+          unzip ../zips/SM-S9080_HKTW_16_Opensource.zip
+          tar -xzf Kernel.tar.gz
+
+          # 2. 解压专属补丁包并覆盖
+          unzip -o ../zips/SM-S9080_HKTW_16_Opensource_S9080ZHS9GZA1.zip
+          tar -xzf Kernel.tar.gz
+          
+          # 3. 整理目录结构
+          rm -rf ../zips Kernel.tar.gz Platform.tar.gz
+
+      - name: 将合并后的源码自动提交回仓库 main 分支
+        run: |
+          shopt -s dotglob
+          mv src_temp/* .
+          rm -rf src_temp zips
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "feat: auto merged S9080ZHS9GZA1 source by GitHub Actions"
+          git push origin main

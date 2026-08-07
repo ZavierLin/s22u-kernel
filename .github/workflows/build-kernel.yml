@@ -1,0 +1,132 @@
+name: Build SM8450 KernelSU Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_DEFCONFIG:
+        description: 'Kernel Defconfig 文件名'
+        required: true
+        default: 'vendor/waipio-gki_defconfig'
+      RELEASE_NOTE:
+        description: 'Release 更新说明'
+        required: false
+        default: '基于 S9080ZHS9GZA1 源码构建的 KernelSU 内核'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出内核源码
+        uses: actions/checkout@v4
+
+      - name: 配置构建环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git ccache automake flex bison libssl-dev \
+            bc libelf-dev libncurses5-dev libncursesw5-dev \
+            zip unzip liblz4-tool u-boot-tools liblzo2-dev \
+            device-tree-compiler python3 python3-pip
+
+      - name: 获取 AOSP Clang 工具链 (r416183b)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/clang
+          cd $GITHUB_WORKSPACE/clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12L-release/clang-r416183b.tar.gz
+          tar -xzf clang-r416183b.tar.gz
+          rm clang-r416183b.tar.gz
+
+      - name: 集成 KernelSU
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+
+      - name: 编译内核 (SM8450 / ARM64)
+        run: |
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC=clang
+          export LLVM=1
+          export LLVM_IAS=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+
+          OUT_DIR=$GITHUB_WORKSPACE/out
+          mkdir -p $OUT_DIR
+
+          # 自动定位源码所在子目录
+          if [ -d "kernel_platform/msm-kernel" ]; then
+            cd kernel_platform/msm-kernel
+          elif [ -d "msm-kernel" ]; then
+            cd msm-kernel
+          fi
+
+          # 生成配置
+          make O=$OUT_DIR ${{ github.event.inputs.KERNEL_DEFCONFIG }}
+
+          # 开始编译
+          make O=$OUT_DIR -j$(nproc --all) 2>&1 | tee $GITHUB_WORKSPACE/build.log
+
+          # 验证内核产物
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
+            echo "IMAGE_PATH=$OUT_DIR/arch/arm64/boot/Image" >> $GITHUB_ENV
+            echo "VMLINUX_PATH=$OUT_DIR/vmlinux" >> $GITHUB_ENV
+            echo "CONFIG_PATH=$OUT_DIR/.config" >> $GITHUB_ENV
+          else
+            echo "::error::内核编译失败，未找到 Image 文件！"
+            exit 1
+          fi
+
+      - name: 打包 AnyKernel3 Zip 刷机包
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/anykernel
+          cd $GITHUB_WORKSPACE/anykernel
+          git clone https://github.com/osm0sis/AnyKernel3.git .
+
+          cp ${{ env.IMAGE_PATH }} ./Image
+
+          # 适配 SM8450 / GKI
+          sed -i 's/properties()/properties() {\nkernel.string=SM8450 KernelSU Kernel\ndo.devicecheck=0\ndo.modules=0\ndo.systemless=1\ndo.cleanup=1\nis.gki=1\n}/g' anykernel.sh
+
+          zip -r9 $GITHUB_WORKSPACE/AnyKernel3-S22U-KSU.zip * -x .git\* README.md
+
+      - name: 保存调试产物到 Artifacts (vmlinux & build.log)
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-artifacts-${{ github.sha }}
+          path: |
+            ${{ env.VMLINUX_PATH }}
+            ${{ env.CONFIG_PATH }}
+            ${{ github.workspace }}/build.log
+          retention-days: 7
+
+      - name: 生成 Release 标签
+        id: tag
+        run: |
+          echo "TAG_NAME=ksu-s22u-$(date +'%Y%m%d-%H%M')" >> $GITHUB_OUTPUT
+
+      - name: 发布 Kernel Release 刷机包
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
+          name: "S22U KernelSU 内核 - ${{ steps.tag.outputs.TAG_NAME }}"
+          body: |
+            ### 📦 内核构建说明
+            ${{ github.event.inputs.RELEASE_NOTE }}
+
+            ---
+            ### 🛠️ 刷入指南
+            1. 下载下方附件中的 `AnyKernel3-S22U-KSU.zip`。
+            2. 在手机端使用 **Kernel Flasher** 或第三方 Recovery 直接刷入。
+            3. 重启后安装最新的 [KernelSU App](https://github.com/tiann/KernelSU/releases) 检查授权。
+
+            ---
+            - **基线固件**: `S9080ZHS9GZA1`
+            - **SoC 平台**: Qualcomm SM8450
+          files: |
+            ${{ github.workspace }}/AnyKernel3-S22U-KSU.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

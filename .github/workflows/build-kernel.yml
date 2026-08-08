@@ -3,14 +3,10 @@ name: Build SM8450 KernelSU Kernel
 on:
   workflow_dispatch:
     inputs:
-      KERNEL_DEFCONFIG:
-        description: 'Kernel Defconfig 文件名'
-        required: true
-        default: 'vendor/waipio-gki_defconfig'
       RELEASE_NOTE:
         description: 'Release 更新说明'
         required: false
-        default: '基于 S9080ZHS9GZA1 源码构建的 KernelSU 内核'
+        default: '基于 S9080ZHS9GZA1 官方源码与 build_kernel_GKI.sh 构建的 KernelSU 内核'
 
 jobs:
   build:
@@ -22,15 +18,24 @@ jobs:
       - name: 检出内核源码
         uses: actions/checkout@v4
 
-      - name: 配置构建环境与 ARM64 交叉编译工具链
+      - name: 配置系统构建环境与交叉编译器
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git ccache automake flex bison libssl-dev \
+            build-essential git ccache automake flex bison libssl-dev \
             bc libelf-dev libncurses5-dev libncursesw5-dev \
             zip unzip liblz4-tool u-boot-tools liblzo2-dev \
-            device-tree-compiler python3 python3-pip \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+            device-tree-compiler python3 python3-pip lld llvm \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: 解压 S9080ZHS9GZA1 专属内核源码包
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/S9080ZHS9GZA1_kernel.tar.gz" ]; then
+            echo "正在解压 S9080ZHS9GZA1 内核源码..."
+            tar -xzf $GITHUB_WORKSPACE/S9080ZHS9GZA1_kernel.tar.gz -C $GITHUB_WORKSPACE
+            echo "解压完成！"
+          fi
 
       - name: 获取 AOSP Clang 工具链 (r416183b)
         run: |
@@ -40,11 +45,25 @@ jobs:
           tar -xzf clang-r416183b.tar.gz
           rm clang-r416183b.tar.gz
 
-      - name: 集成 KernelSU
+      - name: 集成 KernelSU 到内核源码
         run: |
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          KDIR=""
+          if [ -d "$GITHUB_WORKSPACE/kernel_platform/msm-kernel" ]; then
+            KDIR="$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
+          elif [ -d "$GITHUB_WORKSPACE/kernel_platform/common" ]; then
+            KDIR="$GITHUB_WORKSPACE/kernel_platform/common"
+          fi
 
-      - name: 编译内核 (SM8450 / ARM64)
+          if [ -n "$KDIR" ]; then
+            echo "目标内核目录: $KDIR，开始集成 KernelSU..."
+            cd $KDIR
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          else
+            echo "未找到 msm-kernel 目录，尝试在根目录集成 KernelSU"
+            curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          fi
+
+      - name: 调用三星原厂 build_kernel_GKI.sh 编译内核
         run: |
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
           export ARCH=arm64
@@ -53,33 +72,23 @@ jobs:
           export LLVM=1
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CLANG_TRIPLE=aarch64-linux-gnu-
 
-          OUT_DIR=$GITHUB_WORKSPACE/out
-          mkdir -p $OUT_DIR
+          chmod +x $GITHUB_WORKSPACE/build_kernel_GKI.sh
+          cd $GITHUB_WORKSPACE
 
-          # 自动寻找内核主目录位置
-          if [ -d "kernel_platform/msm-kernel" ]; then
-            cd kernel_platform/msm-kernel
-          elif [ -d "msm-kernel" ]; then
-            cd msm-kernel
-          elif [ -d "kernel" ]; then
-            cd kernel
-          fi
+          # 调起三星原厂 GKI 构建脚本
+          ./build_kernel_GKI.sh 2>&1 | tee $GITHUB_WORKSPACE/build.log
 
-          # 1. 生成内核配置
-          make O=$OUT_DIR ${{ github.event.inputs.KERNEL_DEFCONFIG }}
+          # 全局搜索编译生成的 Image 文件
+          IMAGE_FILE=$(find $GITHUB_WORKSPACE -name "Image" -type f | head -n 1)
 
-          # 2. 执行内核构建，并将日志保存至 build.log
-          make O=$OUT_DIR -j$(nproc --all) 2>&1 | tee $GITHUB_WORKSPACE/build.log
-
-          # 3. 校验内核编译产物
-          if [ -f "$OUT_DIR/arch/arm64/boot/Image" ]; then
-            echo "IMAGE_PATH=$OUT_DIR/arch/arm64/boot/Image" >> $GITHUB_ENV
-            echo "VMLINUX_PATH=$OUT_DIR/vmlinux" >> $GITHUB_ENV
-            echo "CONFIG_PATH=$OUT_DIR/.config" >> $GITHUB_ENV
+          if [ -n "$IMAGE_FILE" ]; then
+            echo "成功找到内核编译产物: $IMAGE_FILE"
+            echo "IMAGE_PATH=$IMAGE_FILE" >> $GITHUB_ENV
           else
-            echo "::error::内核编译失败，未在 out 目录找到 Image 文件！"
+            echo "::error::编译结束，未找到 Image 文件！"
             exit 1
           fi
 
@@ -97,14 +106,12 @@ jobs:
 
           zip -r9 $GITHUB_WORKSPACE/AnyKernel3-S22U-KSU.zip * -x .git\* README.md
 
-      - name: 保存调试产物至 Artifacts (vmlinux & build.log)
+      - name: 保存调试产物至 Artifacts (build.log)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-artifacts-${{ github.sha }}
           path: |
-            ${{ env.VMLINUX_PATH }}
-            ${{ env.CONFIG_PATH }}
             ${{ github.workspace }}/build.log
           retention-days: 7
 
@@ -132,7 +139,7 @@ jobs:
 
             ---
             - **基线固件**: `S9080ZHS9GZA1`
-            - **SoC 平台**: Qualcomm SM8450
+            - **SoC 平台**: Qualcomm SM8450 (GKI)
           files: |
             ${{ github.workspace }}/AnyKernel3-S22U-KSU.zip
         env:

@@ -1,0 +1,32 @@
+name: Precise Source Inspector
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 打印与核实源码真实结构
+        run: |
+          echo "================ 1. 仓库根目录内容 ================"
+          ls -la $GITHUB_WORKSPACE
+
+          echo -e "\n================ 2. 查找所有的 Makefile 位置 ================"
+          find $GITHUB_WORKSPACE -maxdepth 4 -name "Makefile"
+
+          echo -e "\n================ 3. 查找所有的 defconfig 配置文件 ================"
+          find $GITHUB_WORKSPACE -maxdepth 5 -name "*defconfig*"
+
+          echo -e "\n================ 4. 查找三星原厂构建脚本 (*.sh) ================"
+          find $GITHUB_WORKSPACE -maxdepth 3 -name "*.sh"
+
+          echo -e "\n================ 5. 检查 kernel_platform 深度结构 ================"
+          if [ -d "$GITHUB_WORKSPACE/kernel_platform" ]; then
+            ls -la $GITHUB_WORKSPACE/kernel_platform
+          else
+            echo "未找到 kernel_platform 目录"
+          fi

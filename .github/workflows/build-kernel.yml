@@ -27,7 +27,8 @@ jobs:
             zip unzip liblz4-tool u-boot-tools liblzo2-dev \
             device-tree-compiler python3 python3-pip lld llvm \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
+            coreutils sed gawk grep
 
       - name: 解压 S9080ZHS9GZA1 专属内核源码包
         run: |
@@ -36,6 +37,20 @@ jobs:
             tar -xzf $GITHUB_WORKSPACE/S9080ZHS9GZA1_kernel.tar.gz -C $GITHUB_WORKSPACE
             echo "解压完成！"
           fi
+
+      - name: 补全 AOSP 封闭构建环境中的系统命令软链接 (解决 command not found)
+        run: |
+          TOOL_PATH="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
+          mkdir -p "$TOOL_PATH"
+          
+          echo "正在将系统常用命令行工具补全至 $TOOL_PATH ..."
+          # 将系统基础命令做软链接，防止 build.sh 覆盖 PATH 后找不到 nproc, sed, readlink 等
+          for cmd in nproc readlink sed tr grep awk cut find sort uniq dirname basename realpath cp mv rm mkdir hostname; do
+            SYS_BIN=$(which $cmd || true)
+            if [ -n "$SYS_BIN" ]; then
+              ln -sf "$SYS_BIN" "$TOOL_PATH/$cmd"
+            fi
+          done
 
       - name: 获取 AOSP Clang 工具链 (r416183b)
         run: |
@@ -59,7 +74,7 @@ jobs:
             cd $KDIR
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           else
-            echo "未找到 msm-kernel 目录，尝试在根目录集成 KernelSU"
+            echo "未找到 msm-kernel 目录，在当前根目录集成 KernelSU"
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           fi
 
@@ -81,9 +96,8 @@ jobs:
           # 调起三星原厂 GKI 构建脚本
           ./build_kernel_GKI.sh 2>&1 | tee $GITHUB_WORKSPACE/build.log
 
-          # 全局搜索编译生成的 Image 文件
+          # 校验产物
           IMAGE_FILE=$(find $GITHUB_WORKSPACE -name "Image" -type f | head -n 1)
-
           if [ -n "$IMAGE_FILE" ]; then
             echo "成功找到内核编译产物: $IMAGE_FILE"
             echo "IMAGE_PATH=$IMAGE_FILE" >> $GITHUB_ENV
@@ -91,6 +105,17 @@ jobs:
             echo "::error::编译结束，未找到 Image 文件！"
             exit 1
           fi
+
+      - name: 编译失败时自动输出 build.log 尾部报错
+        if: failure()
+        run: |
+          echo "=================== BUILD.LOG 尾部 100 行报错日志 ==================="
+          if [ -f "$GITHUB_WORKSPACE/build.log" ]; then
+            tail -n 100 $GITHUB_WORKSPACE/build.log
+          else
+            echo "未找到 build.log 文件！"
+          fi
+          echo "===================================================================="
 
       - name: 打包 AnyKernel3 Zip 刷机包
         if: success()
@@ -101,7 +126,6 @@ jobs:
 
           cp ${{ env.IMAGE_PATH }} ./Image
 
-          # 适配 SM8450 / GKI 架构
           sed -i 's/properties()/properties() {\nkernel.string=SM8450 KernelSU Kernel\ndo.devicecheck=0\ndo.modules=0\ndo.systemless=1\ndo.cleanup=1\nis.gki=1\n}/g' anykernel.sh
 
           zip -r9 $GITHUB_WORKSPACE/AnyKernel3-S22U-KSU.zip * -x .git\* README.md

@@ -38,19 +38,24 @@ jobs:
             echo "解压完成！"
           fi
 
-      - name: 补全 AOSP 封闭构建环境中的系统命令软链接 (解决 command not found)
+      - name: 补全 AOSP 封闭构建环境中的系统命令软链接 (解决 env / nproc 缺失)
         run: |
           TOOL_PATH="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
           mkdir -p "$TOOL_PATH"
           
           echo "正在将系统常用命令行工具补全至 $TOOL_PATH ..."
-          # 将系统基础命令做软链接，防止 build.sh 覆盖 PATH 后找不到 nproc, sed, readlink 等
-          for cmd in nproc readlink sed tr grep awk cut find sort uniq dirname basename realpath cp mv rm mkdir hostname; do
+          # 补全包含 env 在内的所有关键系统指令
+          for cmd in env nproc readlink sed tr grep awk cut find sort uniq dirname basename realpath cp mv rm mkdir hostname expr wc head tail python python3 tar gzip; do
             SYS_BIN=$(which $cmd || true)
             if [ -n "$SYS_BIN" ]; then
               ln -sf "$SYS_BIN" "$TOOL_PATH/$cmd"
             fi
           done
+
+      - name: 预先创建三星原厂编译所需的临时目录 (解决 mktemp 报错)
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/out/target/product/b0q
+          mkdir -p $GITHUB_WORKSPACE/kernel_platform/out/target/product/b0q
 
       - name: 获取 AOSP Clang 工具链 (r416183b)
         run: |

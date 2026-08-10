@@ -1,10 +1,13 @@
-name: Build S22 Ultra Kernel (Phase A)
+name: Build S22 Ultra KernelSU
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-phase-a:
+  build:
     runs-on: ubuntu-22.04
 
     env:
@@ -15,7 +18,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. 检出仓库代码
+      # 1. Checkout
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -23,7 +26,7 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      # 2. 安装宿主机编译依赖
+      # 2. Install build dependencies
       # ============================================================
       - name: Install build dependencies
         run: |
@@ -36,7 +39,7 @@ jobs:
             rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
 
       # ============================================================
-      # 3. 解压三星专属补丁包
+      # 3. Extract Samsung kernel source
       # ============================================================
       - name: Extract Samsung kernel source
         shell: bash
@@ -45,45 +48,26 @@ jobs:
           ARCHIVE=$(find "$GITHUB_WORKSPACE" -name "S9080ZHS9GZA1_kernel.tar.gz" -type f | head -n 1)
 
           if [ -z "$ARCHIVE" ]; then
-            echo "::error::未找到 S9080ZHS9GZA1_kernel.tar.gz！"
+            echo "::error::S9080ZHS9GZA1_kernel.tar.gz not found"
             exit 1
           fi
 
-          echo "解压源码包: $ARCHIVE"
+          echo "Found: $ARCHIVE"
           tar -xzf "$ARCHIVE" -C "$GITHUB_WORKSPACE"
-          echo "源码解压完成。"
+          echo "Kernel source extraction complete."
 
       # ============================================================
-      # 4. 预建目录与修复 AOSP Hermetic PATH 隔离
+      # 4. Prepare output directories
       # ============================================================
-      - name: Prepare directories and repair PATH
-        shell: bash
+      - name: Prepare build directories
         run: |
-          set -e
           mkdir -p "$GITHUB_WORKSPACE/out/target/product/$DEVICE"
           mkdir -p "$GITHUB_WORKSPACE/kernel_platform/out/target/product/$DEVICE"
 
-          # 禁用 build.config 中的 Hermetic 隔离硬编码
-          find "$GITHUB_WORKSPACE" -name "build.config*" -exec sed -i 's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' {} + 2>/dev/null || true
-
-          # 注入宿主机工具软链接，防止 PATH 清空后 command not found
-          TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
-          mkdir -p "$TOOLS"
-
-          COMMANDS="make bash sh env sed awk tr grep egrep fgrep readlink nproc dirname basename expr cat cp mv rm mkdir rmdir touch find xargs ln tar gzip xz sort uniq head tail cut tee printf true false test pwd ls chmod chown date stat file"
-
-          for cmd in $COMMANDS; do
-            if [ -x "/usr/bin/$cmd" ]; then
-              ln -sf "/usr/bin/$cmd" "$TOOLS/$cmd"
-            elif [ -x "/bin/$cmd" ]; then
-              ln -sf "/bin/$cmd" "$TOOLS/$cmd"
-            fi
-          done
-
       # ============================================================
-      # 5. 获取 AOSP Clang 工具链 (r416183b)
+      # 5. Download AOSP Clang
       # ============================================================
-      - name: Download AOSP Clang
+      - name: Download AOSP Clang r416183b
         shell: bash
         run: |
           set -e
@@ -99,20 +83,113 @@ jobs:
           CLANG_DIR=$(find clang-repo -maxdepth 1 -type d -name "$CLANG_VERSION" | head -n 1)
 
           if [ -z "$CLANG_DIR" ]; then
-            echo "::error::未在 $ANDROID_CLANG_BRANCH 分支中找到 $CLANG_VERSION"
+            echo "::error::$CLANG_VERSION not found in $ANDROID_CLANG_BRANCH"
             exit 1
           fi
 
           cp -a "$CLANG_DIR/." clang/
           rm -rf clang-repo
 
-          echo "Clang 版本验证:"
+          echo "Clang version:"
           clang/bin/clang --version
 
       # ============================================================
-      # 6. 定位内核目录并集成 KernelSU
+      # 6. Repair Samsung build-tools PATH (强制覆盖残缺 Wrapper)
       # ============================================================
-      - name: Detect Kernel DIR and Apply KernelSU
+      - name: Repair Samsung build-tools PATH
+        shell: bash
+        run: |
+          set -e
+
+          TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
+          mkdir -p "$TOOLS"
+
+          echo "=========================================="
+          echo "Repair Samsung/AOSP build tools"
+          echo "=========================================="
+          echo "TOOLS: $TOOLS"
+
+          # 禁用 build.config 中的 Hermetic 隔离硬编码
+          find "$GITHUB_WORKSPACE" -name "build.config*" -exec sed -i 's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' {} + 2>/dev/null || true
+
+          REQUIRED_TOOLS="
+          make
+          bison
+          flex
+          env
+          nproc
+          sed
+          readlink
+          tr
+          awk
+          grep
+          egrep
+          fgrep
+          bash
+          sh
+          m4
+          lz4
+          dtc
+          "
+
+          for cmd in $REQUIRED_TOOLS; do
+            HOST_CMD=""
+            if [ -x "/usr/bin/$cmd" ]; then
+              HOST_CMD="/usr/bin/$cmd"
+            elif [ -x "/bin/$cmd" ]; then
+              HOST_CMD="/bin/$cmd"
+            fi
+
+            if [ -n "$HOST_CMD" ]; then
+              # -sf 强行覆盖三星原本指向空目录的残缺 Wrapper 脚本
+              ln -sf "$HOST_CMD" "$TOOLS/$cmd"
+              echo "FIXED: $cmd -> $HOST_CMD"
+            else
+              echo "::error::Host command not found: $cmd"
+              exit 1
+            fi
+          done
+
+          echo
+          echo "=========================================="
+          echo "Verify repaired tools"
+          echo "=========================================="
+          for cmd in make bison flex env nproc sed readlink tr; do
+            echo "[$cmd]"
+            ls -l "$TOOLS/$cmd"
+            readlink -f "$TOOLS/$cmd"
+          done
+
+          echo
+          echo "Host bison version:"
+          /usr/bin/bison --version | head -n 1
+
+          echo
+          echo "Host flex version:"
+          /usr/bin/flex --version | head -n 1
+
+      # ============================================================
+      # 7. Verify repaired build tools
+      # ============================================================
+      - name: Verify repaired build tools
+        shell: bash
+        run: |
+          set -e
+          TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
+          echo "Checking critical tools..."
+
+          for cmd in make bison flex sed tr readlink env nproc; do
+            if [ ! -x "$TOOLS/$cmd" ]; then
+              echo "::error::$cmd is missing from Samsung build-tools"
+              exit 1
+            fi
+            echo "$cmd -> $(readlink -f "$TOOLS/$cmd")"
+          done
+
+      # ============================================================
+      # 8. Detect actual kernel source tree
+      # ============================================================
+      - name: Detect kernel source directory
         shell: bash
         run: |
           set -e
@@ -122,30 +199,49 @@ jobs:
             KERNEL_DIR="$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
           elif [ -d "$GITHUB_WORKSPACE/kernel_platform/common" ]; then
             KERNEL_DIR="$GITHUB_WORKSPACE/kernel_platform/common"
+          else
+            FOUND=$(find "$GITHUB_WORKSPACE/kernel_platform" -maxdepth 3 -type f -name "Makefile" | head -n 1)
+            if [ -n "$FOUND" ]; then
+              KERNEL_DIR="$(dirname "$FOUND")"
+            fi
           fi
 
           if [ -z "$KERNEL_DIR" ]; then
-            echo "::error::无法定位内核主目录！"
+            echo "::error::Unable to detect kernel source directory"
             exit 1
           fi
 
-          echo "内核主目录确定为: $KERNEL_DIR"
+          echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
+          echo "Detected kernel source: $KERNEL_DIR"
+
+      # ============================================================
+      # 9. Integrate KernelSU into actual kernel tree
+      # ============================================================
+      - name: Integrate KernelSU
+        shell: bash
+        run: |
+          set -e
           cd "$KERNEL_DIR"
 
-          # 打印内核基线版本信息
-          if [ -f "Makefile" ]; then
-            echo "=== 内核 Makefile 头信息 ==="
-            head -n 10 Makefile
+          if [ ! -f "Makefile" ] || [ ! -d "drivers" ] || [ ! -f "Kconfig" ]; then
+            echo "::error::Invalid kernel source tree structure at $KERNEL_DIR"
+            exit 1
           fi
 
-          # 集成 KernelSU
-          echo "开始集成 KernelSU..."
+          echo "Running KernelSU setup in: $(pwd)"
           curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
 
+          if [ -d "drivers/kernelsu" ] || [ -d "drivers/ksu" ]; then
+            echo "KernelSU driver directory created successfully."
+          else
+            echo "::error::KernelSU driver directory was not created"
+            exit 1
+          fi
+
       # ============================================================
-      # 7. 执行三星原厂 GKI 内核编译
+      # 10. Build Samsung GKI kernel
       # ============================================================
-      - name: Execute Samsung GKI Build
+      - name: Build Samsung GKI kernel
         shell: bash
         run: |
           set -e
@@ -155,32 +251,29 @@ jobs:
           export ADDITIONAL_PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin"
           export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin:$PATH"
 
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export CC=clang
-          export LLVM=1
-          export LLVM_IAS=1
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-
-          chmod +x ./build_kernel_GKI.sh
-
           echo "=========================================="
-          echo " 启动三星 GKI 内核编译流程"
+          echo "Samsung GKI build"
           echo "=========================================="
 
-          # 调起编译并将完整日志捕获至 build.log
+          echo "PWD: $(pwd)"
+          echo "Build script: $(ls -lh ./build_kernel_GKI.sh)"
+          echo "make: $(command -v make)"
+          echo "bison: $(command -v bison)"
+          echo "flex: $(command -v flex)"
+          echo "clang: $(command -v clang)"
+
+          echo
+          echo "Starting Samsung GKI build..."
           ./build_kernel_GKI.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
       # ============================================================
-      # 8. 保存编译产物与日志至 Artifacts
+      # 11. Upload build artifacts (Phase A Result)
       # ============================================================
-      - name: Upload Phase A Artifacts
+      - name: Upload kernel artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PhaseA-Kernel-Build-Result
+          name: S22U-Kernel-Build-Result
           path: |
             build.log
             kernel_platform/**/Image

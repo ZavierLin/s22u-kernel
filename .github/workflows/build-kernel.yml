@@ -18,7 +18,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Checkout
+      # 1. Checkout repository
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,7 +29,9 @@ jobs:
       # 2. Install build dependencies
       # ============================================================
       - name: Install build dependencies
+        shell: bash
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y \
             bc bison flex build-essential gcc g++ make \
@@ -37,6 +39,57 @@ jobs:
             gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
             libssl-dev libelf-dev libdw-dev python3 python3-pip \
             rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
+
+      # ============================================================
+      # 2.5 Create 12GB Swap (为 LTO vmlinux.o 提供后备内存)
+      # ============================================================
+      - name: Create 12GB Swap
+        shell: bash
+        run: |
+          set -e
+
+          echo "=========================================="
+          echo "Creating 12GB swap"
+          echo "=========================================="
+
+          echo "Before:"
+          free -h
+          df -h /
+
+          SWAPFILE="/swapfile"
+
+          if [ -f "$SWAPFILE" ]; then
+            echo "Existing swapfile detected."
+            if sudo swapon --show | grep -q "$SWAPFILE"; then
+              echo "Disabling existing swapfile..."
+              sudo swapoff "$SWAPFILE" || true
+            fi
+            sudo rm -f "$SWAPFILE"
+          fi
+
+          AVAILABLE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
+          REQUIRED_KB=$((12 * 1024 * 1024))
+
+          echo "Available disk space: ${AVAILABLE_KB} KB"
+          echo "Required for swap:    ${REQUIRED_KB} KB"
+
+          if [ "$AVAILABLE_KB" -lt "$REQUIRED_KB" ]; then
+            echo "::error::Not enough disk space to create 12GB swap."
+            exit 1
+          fi
+
+          sudo fallocate -l 12G "$SWAPFILE"
+          sudo chmod 600 "$SWAPFILE"
+          sudo mkswap "$SWAPFILE"
+          sudo swapon "$SWAPFILE"
+
+          echo
+          echo "=========================================="
+          echo "Swap status"
+          echo "=========================================="
+          sudo swapon --show
+          free -h
+          echo "Swap successfully enabled."
 
       # ============================================================
       # 3. Extract Samsung kernel source
@@ -57,17 +110,19 @@ jobs:
           echo "Kernel source extraction complete."
 
       # ============================================================
-      # 4. Prepare output directories
+      # 4. Prepare build directories
       # ============================================================
       - name: Prepare build directories
+        shell: bash
         run: |
+          set -e
           mkdir -p "$GITHUB_WORKSPACE/out/target/product/$DEVICE"
           mkdir -p "$GITHUB_WORKSPACE/kernel_platform/out/target/product/$DEVICE"
 
       # ============================================================
-      # 5. Download AOSP Clang
+      # 5. Download AOSP Clang r416183b
       # ============================================================
-      - name: Download AOSP Clang r416183b
+      - name: Download AOSP Clang
         shell: bash
         run: |
           set -e
@@ -94,7 +149,7 @@ jobs:
           clang/bin/clang --version
 
       # ============================================================
-      # 6. Repair Samsung build-tools PATH (强制覆盖残缺 Wrapper)
+      # 6. Repair Samsung build-tools PATH
       # ============================================================
       - name: Repair Samsung build-tools PATH
         shell: bash
@@ -104,12 +159,6 @@ jobs:
           TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
           mkdir -p "$TOOLS"
 
-          echo "=========================================="
-          echo "Repair Samsung/AOSP build tools"
-          echo "=========================================="
-          echo "TOOLS: $TOOLS"
-
-          # 禁用 build.config 中的 Hermetic 隔离硬编码
           find "$GITHUB_WORKSPACE" -name "build.config*" -exec sed -i 's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' {} + 2>/dev/null || true
 
           REQUIRED_TOOLS="
@@ -141,7 +190,6 @@ jobs:
             fi
 
             if [ -n "$HOST_CMD" ]; then
-              # -sf 强行覆盖三星原本指向空目录的残缺 Wrapper 脚本
               ln -sf "$HOST_CMD" "$TOOLS/$cmd"
               echo "FIXED: $cmd -> $HOST_CMD"
             else
@@ -149,24 +197,6 @@ jobs:
               exit 1
             fi
           done
-
-          echo
-          echo "=========================================="
-          echo "Verify repaired tools"
-          echo "=========================================="
-          for cmd in make bison flex env nproc sed readlink tr; do
-            echo "[$cmd]"
-            ls -l "$TOOLS/$cmd"
-            readlink -f "$TOOLS/$cmd"
-          done
-
-          echo
-          echo "Host bison version:"
-          /usr/bin/bison --version | head -n 1
-
-          echo
-          echo "Host flex version:"
-          /usr/bin/flex --version | head -n 1
 
       # ============================================================
       # 7. Verify repaired build tools
@@ -239,6 +269,34 @@ jobs:
           fi
 
       # ============================================================
+      # 9.5 Start background resource monitor (用于确诊 143 真因)
+      # ============================================================
+      - name: Start resource monitor
+        shell: bash
+        run: |
+          set -e
+          (
+            while true; do
+              echo "============================================================"
+              echo "RESOURCE MONITOR $(date)"
+              echo "============================================================"
+              echo "--- Memory & Swap ---"
+              free -h
+              echo "--- Swap usage ---"
+              swapon --show || true
+              echo "--- Disk usage ---"
+              df -h "$GITHUB_WORKSPACE"
+              echo "--- Top processes by memory ---"
+              ps -eo pid,ppid,%cpu,%mem,rss,etime,comm --sort=-%mem | head -n 12
+              echo ""
+              sleep 10
+            done
+          ) > "$GITHUB_WORKSPACE/resource-monitor.log" 2>&1 &
+
+          echo $! > /tmp/resource-monitor.pid
+          echo "Resource monitor started with PID: $(cat /tmp/resource-monitor.pid)"
+
+      # ============================================================
       # 10. Build Samsung GKI kernel
       # ============================================================
       - name: Build Samsung GKI kernel
@@ -251,31 +309,72 @@ jobs:
           export ADDITIONAL_PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin"
           export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin:$PATH"
 
+          # 限制并行编译任务数，控制物理内存开销峰值
+          export MAKEFLAGS="-j2"
+
           echo "=========================================="
           echo "Samsung GKI build"
           echo "=========================================="
 
-          echo "PWD: $(pwd)"
-          echo "Build script: $(ls -lh ./build_kernel_GKI.sh)"
-          echo "make: $(command -v make)"
-          echo "bison: $(command -v bison)"
-          echo "flex: $(command -v flex)"
-          echo "clang: $(command -v clang)"
+          echo
+          echo "System memory:"
+          free -h
 
           echo
-          echo "Starting Samsung GKI build..."
+          echo "Swap:"
+          sudo swapon --show || true
+
+          echo
+          echo "CPU:"
+          nproc
+
+          echo
+          echo "MAKEFLAGS:"
+          echo "$MAKEFLAGS"
+
+          echo
+          echo "Toolchain:"
+          echo "make:   $(command -v make)"
+          echo "bison:  $(command -v bison)"
+          echo "flex:   $(command -v flex)"
+          echo "clang:  $(command -v clang)"
+
+          echo
+          echo "Versions:"
+          make --version | head -n 1
+          clang --version | head -n 1
+
+          echo
+          echo "=========================================="
+          echo "Starting Samsung GKI build"
+          echo "=========================================="
+
           ./build_kernel_GKI.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
       # ============================================================
-      # 11. Upload build artifacts (Phase A Result)
+      # 10.5 Stop resource monitor
+      # ============================================================
+      - name: Stop resource monitor
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -f /tmp/resource-monitor.pid ]; then
+            kill "$(cat /tmp/resource-monitor.pid)" 2>/dev/null || true
+            echo "Resource monitor stopped."
+          fi
+
+      # ============================================================
+      # 11. Upload build artifacts & diagnostics
       # ============================================================
       - name: Upload kernel artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: S22U-Kernel-Build-Result
+          name: S22U-Kernel-PhaseA-Result
           path: |
             build.log
+            resource-monitor.log
             kernel_platform/**/Image
             kernel_platform/**/Image.lz4
             out/**/vmlinux

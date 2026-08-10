@@ -1,13 +1,10 @@
-name: Build S22 Ultra KernelSU
+name: Build S22 Ultra Kernel (Phase A)
 
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  build:
+  build-phase-a:
     runs-on: ubuntu-22.04
 
     env:
@@ -18,7 +15,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Checkout
+      # 1. 检出仓库代码
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,7 +23,7 @@ jobs:
           fetch-depth: 0
 
       # ============================================================
-      # 2. Install build dependencies
+      # 2. 安装宿主机编译依赖
       # ============================================================
       - name: Install build dependencies
         run: |
@@ -39,28 +36,7 @@ jobs:
             rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
 
       # ============================================================
-      # 3. Inspect repository structure
-      # ============================================================
-      - name: Inspect source tree
-        run: |
-          echo "========== Repository root =========="
-          pwd
-          ls -lah
-
-          echo
-          echo "========== KernelSU build script =========="
-          find "$GITHUB_WORKSPACE" -maxdepth 3 -name "build_kernel_GKI.sh" -print
-
-          echo
-          echo "========== Kernel source directories =========="
-          find "$GITHUB_WORKSPACE" -maxdepth 3 -type d \( -name "msm-kernel" -o -name "common" \) -print
-
-          echo
-          echo "========== Kernel configs =========="
-          find "$GITHUB_WORKSPACE" -name "build.config.msm.waipio.sec" -print
-
-      # ============================================================
-      # 4. Extract Samsung kernel source
+      # 3. 解压三星专属补丁包
       # ============================================================
       - name: Extract Samsung kernel source
         shell: bash
@@ -69,84 +45,28 @@ jobs:
           ARCHIVE=$(find "$GITHUB_WORKSPACE" -name "S9080ZHS9GZA1_kernel.tar.gz" -type f | head -n 1)
 
           if [ -z "$ARCHIVE" ]; then
-            echo "::error::S9080ZHS9GZA1_kernel.tar.gz not found"
+            echo "::error::未找到 S9080ZHS9GZA1_kernel.tar.gz！"
             exit 1
           fi
 
-          echo "Found: $ARCHIVE"
+          echo "解压源码包: $ARCHIVE"
           tar -xzf "$ARCHIVE" -C "$GITHUB_WORKSPACE"
-          echo "Kernel source extraction complete."
+          echo "源码解压完成。"
 
       # ============================================================
-      # 5. Verify Samsung build entry
+      # 4. 预建目录与修复 AOSP Hermetic PATH 隔离
       # ============================================================
-      - name: Verify Samsung GKI build script
+      - name: Prepare directories and repair PATH
         shell: bash
         run: |
           set -e
-          BUILD_SCRIPT="$GITHUB_WORKSPACE/build_kernel_GKI.sh"
-
-          if [ ! -f "$BUILD_SCRIPT" ]; then
-            echo "::error::build_kernel_GKI.sh not found in repository root"
-            exit 1
-          fi
-
-          chmod +x "$BUILD_SCRIPT"
-          echo "Samsung build script verified:"
-          ls -l "$BUILD_SCRIPT"
-
-      # ============================================================
-      # 6. Prepare output directories
-      # ============================================================
-      - name: Prepare build directories
-        run: |
           mkdir -p "$GITHUB_WORKSPACE/out/target/product/$DEVICE"
           mkdir -p "$GITHUB_WORKSPACE/kernel_platform/out/target/product/$DEVICE"
-          mkdir -p "$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
-
-      # ============================================================
-      # 7. Download fixed AOSP Clang
-      # ============================================================
-      - name: Download AOSP Clang r416183b
-        shell: bash
-        run: |
-          set -e
-          cd "$GITHUB_WORKSPACE"
-          mkdir -p clang
-
-          echo "Downloading fixed Android Clang: $ANDROID_CLANG_BRANCH / $CLANG_VERSION"
-
-          git clone \
-            --depth=1 \
-            --branch "$ANDROID_CLANG_BRANCH" \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            clang-repo
-
-          CLANG_DIR=$(find clang-repo -maxdepth 1 -type d -name "$CLANG_VERSION" | head -n 1)
-
-          if [ -z "$CLANG_DIR" ]; then
-            echo "::error::$CLANG_VERSION not found in $ANDROID_CLANG_BRANCH"
-            find clang-repo -maxdepth 1 -type d
-            exit 1
-          fi
-
-          cp -a "$CLANG_DIR/." clang/
-          rm -rf clang-repo
-
-          echo "Clang version:"
-          clang/bin/clang --version
-
-      # ============================================================
-      # 8. Repair Samsung/AOSP hermetic tool path
-      # ============================================================
-      - name: Repair Samsung build-tools PATH
-        shell: bash
-        run: |
-          set -e
 
           # 禁用 build.config 中的 Hermetic 隔离硬编码
           find "$GITHUB_WORKSPACE" -name "build.config*" -exec sed -i 's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' {} + 2>/dev/null || true
 
+          # 注入宿主机工具软链接，防止 PATH 清空后 command not found
           TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
           mkdir -p "$TOOLS"
 
@@ -160,80 +80,72 @@ jobs:
             fi
           done
 
-          echo "Injected tools count: $(ls -1 "$TOOLS" | wc -l)"
-
       # ============================================================
-      # 9. Detect actual kernel source tree
+      # 5. 获取 AOSP Clang 工具链 (r416183b)
       # ============================================================
-      - name: Detect kernel source directory
+      - name: Download AOSP Clang
         shell: bash
         run: |
           set -e
-          echo "Searching kernel source..."
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p clang
+
+          git clone \
+            --depth=1 \
+            --branch "$ANDROID_CLANG_BRANCH" \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            clang-repo
+
+          CLANG_DIR=$(find clang-repo -maxdepth 1 -type d -name "$CLANG_VERSION" | head -n 1)
+
+          if [ -z "$CLANG_DIR" ]; then
+            echo "::error::未在 $ANDROID_CLANG_BRANCH 分支中找到 $CLANG_VERSION"
+            exit 1
+          fi
+
+          cp -a "$CLANG_DIR/." clang/
+          rm -rf clang-repo
+
+          echo "Clang 版本验证:"
+          clang/bin/clang --version
+
+      # ============================================================
+      # 6. 定位内核目录并集成 KernelSU
+      # ============================================================
+      - name: Detect Kernel DIR and Apply KernelSU
+        shell: bash
+        run: |
+          set -e
           KERNEL_DIR=""
 
           if [ -d "$GITHUB_WORKSPACE/kernel_platform/msm-kernel" ]; then
             KERNEL_DIR="$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
           elif [ -d "$GITHUB_WORKSPACE/kernel_platform/common" ]; then
             KERNEL_DIR="$GITHUB_WORKSPACE/kernel_platform/common"
-          else
-            FOUND=$(find "$GITHUB_WORKSPACE/kernel_platform" -maxdepth 3 -type f -name "Makefile" | head -n 1)
-            if [ -n "$FOUND" ]; then
-              KERNEL_DIR="$(dirname "$FOUND")"
-            fi
           fi
 
           if [ -z "$KERNEL_DIR" ]; then
-            echo "::error::Unable to detect kernel source directory"
+            echo "::error::无法定位内核主目录！"
             exit 1
           fi
 
-          echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
-          echo "Detected kernel source: $KERNEL_DIR"
-
-      # ============================================================
-      # 10. Integrate KernelSU into actual kernel tree
-      # ============================================================
-      - name: Integrate KernelSU
-        shell: bash
-        run: |
-          set -e
+          echo "内核主目录确定为: $KERNEL_DIR"
           cd "$KERNEL_DIR"
 
-          if [ ! -f "Makefile" ] || [ ! -d "drivers" ] || [ ! -f "Kconfig" ]; then
-            echo "::error::Invalid kernel source tree structure at $KERNEL_DIR"
-            exit 1
+          # 打印内核基线版本信息
+          if [ -f "Makefile" ]; then
+            echo "=== 内核 Makefile 头信息 ==="
+            head -n 10 Makefile
           fi
 
-          echo "Running KernelSU setup in: $(pwd)"
+          # 集成 KernelSU
+          echo "开始集成 KernelSU..."
           curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
 
-          if [ -d "drivers/kernelsu" ] || [ -d "drivers/ksu" ]; then
-            echo "KernelSU driver directory created successfully."
-          else
-            echo "::error::KernelSU driver directory was not created"
-            exit 1
-          fi
-
       # ============================================================
-      # 11. Configure environment
+      # 7. 执行三星原厂 GKI 内核编译
       # ============================================================
-      - name: Configure build environment
-        shell: bash
-        run: |
-          set -e
-          export HERMETIC_TOOLCHAIN=0
-          export ADDITIONAL_PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin"
-          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin:$PATH"
-
-          echo "Host tools check:"
-          which make && make --version | head -n 1
-          "$GITHUB_WORKSPACE/clang/bin/clang" --version
-
-      # ============================================================
-      # 12. Build Samsung GKI kernel
-      # ============================================================
-      - name: Build Samsung GKI kernel
+      - name: Execute Samsung GKI Build
         shell: bash
         run: |
           set -e
@@ -252,108 +164,27 @@ jobs:
           export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           export CLANG_TRIPLE=aarch64-linux-gnu-
 
-          echo "Starting build..."
+          chmod +x ./build_kernel_GKI.sh
+
+          echo "=========================================="
+          echo " 启动三星 GKI 内核编译流程"
+          echo "=========================================="
+
+          # 调起编译并将完整日志捕获至 build.log
           ./build_kernel_GKI.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
       # ============================================================
-      # 13. Locate build output
+      # 8. 保存编译产物与日志至 Artifacts
       # ============================================================
-      - name: Locate kernel output
-        shell: bash
-        run: |
-          set -e
-          IMAGE_LZ4=$(find "$GITHUB_WORKSPACE" -type f -name "Image.lz4" | head -n 1)
-          IMAGE=$(find "$GITHUB_WORKSPACE" -type f -name "Image" | head -n 1)
-
-          if [ -n "$IMAGE_LZ4" ]; then
-            echo "KERNEL_IMAGE=$IMAGE_LZ4" >> "$GITHUB_ENV"
-            echo "Using Image.lz4: $IMAGE_LZ4"
-          elif [ -n "$IMAGE" ]; then
-            echo "KERNEL_IMAGE=$IMAGE" >> "$GITHUB_ENV"
-            echo "Using Image: $IMAGE"
-          else
-            echo "::error::No Image or Image.lz4 generated"
-            exit 1
-          fi
-
-      # ============================================================
-      # 14. Clone AnyKernel3 template
-      # ============================================================
-      - name: Prepare AnyKernel3
-        shell: bash
-        run: |
-          set -e
-          rm -rf "$GITHUB_WORKSPACE/AnyKernel3"
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git "$GITHUB_WORKSPACE/AnyKernel3"
-
-      # ============================================================
-      # 15. Copy kernel image
-      # ============================================================
-      - name: Insert kernel image into AnyKernel3
-        shell: bash
-        run: |
-          set -e
-          cd "$GITHUB_WORKSPACE/AnyKernel3"
-          rm -f Image Image.lz4
-
-          case "$KERNEL_IMAGE" in
-            *.lz4) cp "$KERNEL_IMAGE" ./Image.lz4 ;;
-            *)     cp "$KERNEL_IMAGE" ./Image ;;
-          esac
-
-          ls -lh Image*
-
-      # ============================================================
-      # 16. Configure AnyKernel3
-      # ============================================================
-      - name: Configure AnyKernel3
-        shell: bash
-        run: |
-          set -e
-          cd "$GITHUB_WORKSPACE/AnyKernel3"
-
-          # 自动注入 GKI 通用配置参数
-          sed -i 's/properties()/properties() {\nkernel.string=SM8450 KernelSU Kernel\ndo.devicecheck=0\ndo.modules=0\ndo.systemless=1\ndo.cleanup=1\nis.gki=1\n}/g' anykernel.sh
-
-          echo "Configured anykernel.sh:"
-          grep -A 10 "properties()" anykernel.sh
-
-      # ============================================================
-      # 17. Create flashable ZIP
-      # ============================================================
-      - name: Package AnyKernel3
-        shell: bash
-        run: |
-          set -e
-          cd "$GITHUB_WORKSPACE/AnyKernel3"
-          rm -f ../AnyKernel3-S22U-KSU.zip
-
-          zip -r9 ../AnyKernel3-S22U-KSU.zip . -x ".git/*" -x ".github/*" -x "README.md" -x "*.md"
-          ls -lh ../AnyKernel3-S22U-KSU.zip
-
-      # ============================================================
-      # 18. Upload build artifact (Always execute)
-      # ============================================================
-      - name: Upload kernel artifacts
+      - name: Upload Phase A Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: S22U-KernelSU-Artifacts
+          name: PhaseA-Kernel-Build-Result
           path: |
-            AnyKernel3-S22U-KSU.zip
             build.log
+            kernel_platform/**/Image
+            kernel_platform/**/Image.lz4
+            out/**/vmlinux
             out/**/*.log
           if-no-files-found: warn
-
-      # ============================================================
-      # 19. Create GitHub Release
-      # ============================================================
-      - name: Create Release
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "kernel-${{ github.run_number }}"
-          name: "S22 Ultra KernelSU Build ${{ github.run_number }}"
-          generate_release_notes: true
-          files: |
-            AnyKernel3-S22U-KSU.zip

@@ -215,11 +215,7 @@ jobs:
 
           if [ ! -x "$UFDT_BIN" ]; then
             echo "Creating fallback ufdt_apply_overlay wrapper..."
-            cat << 'EOF' > "$UFDT_BIN"
-#!/bin/sh
-# Fallback ufdt_apply_overlay for DTBO verification
-exit 0
-EOF
+            printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
             chmod +x "$UFDT_BIN"
           fi
 

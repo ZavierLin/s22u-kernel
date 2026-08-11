@@ -149,7 +149,7 @@ jobs:
           clang/bin/clang --version
 
       # ============================================================
-      # 6. Repair Samsung build-tools PATH & Add ufdt_apply_overlay
+      # 6. Repair Samsung build-tools PATH, Add ufdt_apply_overlay & mkdtboimg.py
       # ============================================================
       - name: Repair Samsung build-tools PATH
         shell: bash
@@ -179,6 +179,8 @@ jobs:
           m4
           lz4
           dtc
+          python
+          python3
           "
 
           for cmd in $REQUIRED_TOOLS; do
@@ -198,7 +200,7 @@ jobs:
             fi
           done
 
-          # 强制彻底清理可能存在的死软链接
+          # 1. 补全 ufdt_apply_overlay
           UFDT_BIN="$TOOLS/ufdt_apply_overlay"
           rm -f "$UFDT_BIN"
 
@@ -222,8 +224,25 @@ jobs:
             chmod +x "$UFDT_BIN"
           fi
 
-          echo "ufdt_apply_overlay check:"
+          # 2. 补全 mkdtboimg.py (解决 dtbo.img 打包产生的 Error 127)
+          MKDTBOIMG_BIN="$TOOLS/mkdtboimg.py"
+          rm -f "$MKDTBOIMG_BIN"
+
+          FOUND_MKDTBOIMG=$(find "$GITHUB_WORKSPACE" -type f -name "mkdtboimg.py" | head -n 1)
+
+          if [ -n "$FOUND_MKDTBOIMG" ]; then
+            echo "Found mkdtboimg.py at $FOUND_MKDTBOIMG"
+            ln -sf "$FOUND_MKDTBOIMG" "$MKDTBOIMG_BIN"
+            chmod +x "$MKDTBOIMG_BIN"
+          else
+            echo "mkdtboimg.py not found in source tree, fetching AOSP script..."
+            curl -LSs "https://raw.githubusercontent.com/aosp-mirror/platform_system_libufdt/master/utils/src/mkdtboimg.py" > "$MKDTBOIMG_BIN" || true
+            chmod +x "$MKDTBOIMG_BIN"
+          fi
+
+          echo "Tools check:"
           ls -l "$UFDT_BIN"
+          ls -l "$MKDTBOIMG_BIN"
 
       # ============================================================
       # 7. Verify repaired build tools
@@ -235,7 +254,7 @@ jobs:
           TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
           echo "Checking critical tools..."
 
-          for cmd in make bison flex sed tr readlink env nproc ufdt_apply_overlay; do
+          for cmd in make bison flex sed tr readlink env nproc ufdt_apply_overlay mkdtboimg.py; do
             if [ ! -x "$TOOLS/$cmd" ]; then
               echo "::error::$cmd is missing from Samsung build-tools"
               exit 1
@@ -371,5 +390,6 @@ jobs:
             kernel_platform/**/Image
             kernel_platform/**/Image.lz4
             out/**/vmlinux
+            out/**/dtbo.img
             out/**/*.log
           if-no-files-found: warn

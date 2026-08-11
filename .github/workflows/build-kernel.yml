@@ -198,8 +198,10 @@ jobs:
             fi
           done
 
-          # 补全 ufdt_apply_overlay (解决 DTBO 校验产生的 Error 127)
+          # 强制彻底清理可能存在的死软链接
           UFDT_BIN="$TOOLS/ufdt_apply_overlay"
+          rm -f "$UFDT_BIN"
+
           LIBUFDT_SRC=$(find "$GITHUB_WORKSPACE/kernel_platform" -type d -name "libufdt" | head -n 1)
 
           if [ -n "$LIBUFDT_SRC" ] && [ -d "$LIBUFDT_SRC/utils/src" ]; then
@@ -215,6 +217,7 @@ jobs:
 
           if [ ! -x "$UFDT_BIN" ]; then
             echo "Creating fallback ufdt_apply_overlay wrapper..."
+            rm -f "$UFDT_BIN"
             printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
             chmod +x "$UFDT_BIN"
           fi

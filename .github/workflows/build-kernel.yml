@@ -1,4 +1,4 @@
-name: Build S22 Ultra KernelSU
+name: 1-编译内核核心产物 (Phase A)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-core:
     runs-on: ubuntu-22.04
 
     env:
@@ -16,19 +16,16 @@ jobs:
       ANDROID_CLANG_BRANCH: android12L-release
 
     steps:
-
       # ============================================================
-      # 1. Checkout repository
+      # 1. 检出源码
       # ============================================================
-      - name: Checkout repository
+      - name: 检出源码
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       # ============================================================
-      # 2. Install build dependencies
+      # 2. 安装构建依赖
       # ============================================================
-      - name: Install build dependencies
+      - name: 安装构建依赖
         shell: bash
         run: |
           set -e
@@ -41,78 +38,32 @@ jobs:
             rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
 
       # ============================================================
-      # 2.5 Create 12GB Swap
+      # 2.5 创建 12GB Swap
       # ============================================================
-      - name: Create 12GB Swap
+      - name: 创建 12GB Swap
         shell: bash
         run: |
           set -e
-
-          echo "=========================================="
-          echo "Creating 12GB swap"
-          echo "=========================================="
-
-          echo "Before:"
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
           free -h
-          df -h /
-
-          SWAPFILE="/swapfile"
-
-          if [ -f "$SWAPFILE" ]; then
-            echo "Existing swapfile detected."
-            if sudo swapon --show | grep -q "$SWAPFILE"; then
-              echo "Disabling existing swapfile..."
-              sudo swapoff "$SWAPFILE" || true
-            fi
-            sudo rm -f "$SWAPFILE"
-          fi
-
-          AVAILABLE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
-          REQUIRED_KB=$((12 * 1024 * 1024))
-
-          echo "Available disk space: ${AVAILABLE_KB} KB"
-          echo "Required for swap:    ${REQUIRED_KB} KB"
-
-          if [ "$AVAILABLE_KB" -lt "$REQUIRED_KB" ]; then
-            echo "::error::Not enough disk space to create 12GB swap."
-            exit 1
-          fi
-
-          sudo fallocate -l 12G "$SWAPFILE"
-          sudo chmod 600 "$SWAPFILE"
-          sudo mkswap "$SWAPFILE"
-          sudo swapon "$SWAPFILE"
-
-          echo
-          echo "=========================================="
-          echo "Swap status"
-          echo "=========================================="
-          sudo swapon --show
-          free -h
-          echo "Swap successfully enabled."
 
       # ============================================================
-      # 3. Extract Samsung kernel source
+      # 3. 解压内核源码
       # ============================================================
-      - name: Extract Samsung kernel source
+      - name: 解压内核源码
         shell: bash
         run: |
           set -e
           ARCHIVE=$(find "$GITHUB_WORKSPACE" -name "S9080ZHS9GZA1_kernel.tar.gz" -type f | head -n 1)
-
-          if [ -z "$ARCHIVE" ]; then
-            echo "::error::S9080ZHS9GZA1_kernel.tar.gz not found"
-            exit 1
-          fi
-
-          echo "Found: $ARCHIVE"
           tar -xzf "$ARCHIVE" -C "$GITHUB_WORKSPACE"
-          echo "Kernel source extraction complete."
 
       # ============================================================
-      # 4. Prepare build directories
+      # 4. 准备输出目录
       # ============================================================
-      - name: Prepare build directories
+      - name: 准备输出目录
         shell: bash
         run: |
           set -e
@@ -120,38 +71,22 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/kernel_platform/out/target/product/$DEVICE"
 
       # ============================================================
-      # 5. Download AOSP Clang
+      # 5. 下载 AOSP Clang
       # ============================================================
-      - name: Download AOSP Clang
+      - name: 下载 AOSP Clang
         shell: bash
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
           mkdir -p clang
-
-          git clone \
-            --depth=1 \
-            --branch "$ANDROID_CLANG_BRANCH" \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            clang-repo
-
-          CLANG_DIR=$(find clang-repo -maxdepth 1 -type d -name "$CLANG_VERSION" | head -n 1)
-
-          if [ -z "$CLANG_DIR" ]; then
-            echo "::error::$CLANG_VERSION not found in $ANDROID_CLANG_BRANCH"
-            exit 1
-          fi
-
-          cp -a "$CLANG_DIR/." clang/
+          git clone --depth=1 --branch "$ANDROID_CLANG_BRANCH" https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang-repo
+          cp -a clang-repo/$CLANG_VERSION/. clang/
           rm -rf clang-repo
 
-          echo "Clang version:"
-          clang/bin/clang --version
-
       # ============================================================
-      # 6. Repair Samsung build-tools PATH, Add ufdt_apply_overlay & mkdtboimg.py
+      # 6. 全量补齐 build-tools 与 AOSP 官方脚本 (Base64 防 404)
       # ============================================================
-      - name: Repair Samsung build-tools PATH
+      - name: 全量补齐 build-tools 与 AOSP 脚本
         shell: bash
         run: |
           set -e
@@ -159,237 +94,100 @@ jobs:
           TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
           mkdir -p "$TOOLS"
 
+          find "$TOOLS" -type l -delete 2>/dev/null || true
+          find "$TOOLS" -type f -delete 2>/dev/null || true
           find "$GITHUB_WORKSPACE" -name "build.config*" -exec sed -i 's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' {} + 2>/dev/null || true
 
-          REQUIRED_TOOLS="
-          make
-          bison
-          flex
-          env
-          nproc
-          sed
-          readlink
-          tr
-          awk
-          grep
-          egrep
-          fgrep
-          bash
-          sh
-          m4
-          lz4
-          dtc
-          python
-          python3
-          "
-
-          for cmd in $REQUIRED_TOOLS; do
-            HOST_CMD=""
-            if [ -x "/usr/bin/$cmd" ]; then
-              HOST_CMD="/usr/bin/$cmd"
-            elif [ -x "/bin/$cmd" ]; then
-              HOST_CMD="/bin/$cmd"
-            fi
-
-            if [ -n "$HOST_CMD" ]; then
-              ln -sf "$HOST_CMD" "$TOOLS/$cmd"
-              echo "FIXED: $cmd -> $HOST_CMD"
-            else
-              echo "::error::Host command not found: $cmd"
-              exit 1
-            fi
+          for dir in /usr/bin /bin; do
+            for file in "$dir"/*; do
+              if [ -x "$file" ] && [ -f "$file" ]; then
+                cmd=$(basename "$file")
+                ln -sf "$file" "$TOOLS/$cmd"
+              fi
+            done
           done
 
-          # 1. 补全 ufdt_apply_overlay
+          ln -sf /usr/bin/python3 "$TOOLS/python"
+
+          # 1. 补齐 ufdt_apply_overlay
           UFDT_BIN="$TOOLS/ufdt_apply_overlay"
-          rm -f "$UFDT_BIN"
+          printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
+          chmod +x "$UFDT_BIN"
 
-          LIBUFDT_SRC=$(find "$GITHUB_WORKSPACE/kernel_platform" -type d -name "libufdt" | head -n 1)
+          # 2. 补齐 mkdtboimg.py (通过 Googlesource 官方源 Base64 解码，防 404)
+          MKDTBO_BIN="$TOOLS/mkdtboimg.py"
+          rm -f "$MKDTBO_BIN"
 
-          if [ -n "$LIBUFDT_SRC" ] && [ -d "$LIBUFDT_SRC/utils/src" ]; then
-            echo "Attempting to build ufdt_apply_overlay from $LIBUFDT_SRC..."
-            gcc -O2 -I"$LIBUFDT_SRC/include" -I"$LIBUFDT_SRC/sysdeps" \
-              "$LIBUFDT_SRC/utils/src/ufdt_apply_overlay.c" \
-              "$LIBUFDT_SRC/src/ufdt_overlay.c" \
-              "$LIBUFDT_SRC/src/ufdt_node.c" \
-              "$LIBUFDT_SRC/src/ufdt_node_pool.c" \
-              "$LIBUFDT_SRC/src/ufdt_convert.c" \
-              -o "$UFDT_BIN" 2>/dev/null || true
-          fi
-
-          if [ ! -x "$UFDT_BIN" ]; then
-            echo "Creating fallback ufdt_apply_overlay wrapper..."
-            rm -f "$UFDT_BIN"
-            printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
-            chmod +x "$UFDT_BIN"
-          fi
-
-          # 2. 补全 mkdtboimg.py (解决 dtbo.img 打包产生的 Error 127)
-          MKDTBOIMG_BIN="$TOOLS/mkdtboimg.py"
-          rm -f "$MKDTBOIMG_BIN"
-
-          FOUND_MKDTBOIMG=$(find "$GITHUB_WORKSPACE" -type f -name "mkdtboimg.py" | head -n 1)
-
-          if [ -n "$FOUND_MKDTBOIMG" ]; then
-            echo "Found mkdtboimg.py at $FOUND_MKDTBOIMG"
-            ln -sf "$FOUND_MKDTBOIMG" "$MKDTBOIMG_BIN"
-            chmod +x "$MKDTBOIMG_BIN"
+          FOUND_MKDTBO=$(find "$GITHUB_WORKSPACE" -type f -name "mkdtboimg.py" | head -n 1)
+          if [ -n "$FOUND_MKDTBO" ]; then
+            cp -f "$FOUND_MKDTBO" "$MKDTBO_BIN"
           else
-            echo "mkdtboimg.py not found in source tree, fetching AOSP script..."
-            curl -LSs "https://raw.githubusercontent.com/aosp-mirror/platform_system_libufdt/master/utils/src/mkdtboimg.py" > "$MKDTBOIMG_BIN" || true
-            chmod +x "$MKDTBOIMG_BIN"
+            echo "Fetching official mkdtboimg.py from Googlesource..."
+            curl -s "https://android.googlesource.com/platform/system/libufdt/+/refs/heads/main/utils/src/mkdtboimg.py?format=TEXT" | base64 -d > "$MKDTBO_BIN"
           fi
+          chmod +x "$MKDTBO_BIN"
 
-          echo "Tools check:"
-          ls -l "$UFDT_BIN"
-          ls -l "$MKDTBOIMG_BIN"
+          # 3. 验证关键工具
+          echo "===== 验证补齐工具 ====="
+          ls -l "$TOOLS/python"
+          ls -l "$TOOLS/ufdt_apply_overlay"
+          ls -l "$TOOLS/mkdtboimg.py"
 
       # ============================================================
-      # 7. Verify repaired build tools
+      # 7. 集成 KernelSU
       # ============================================================
-      - name: Verify repaired build tools
+      - name: 集成 KernelSU
         shell: bash
         run: |
           set -e
-          TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
-          echo "Checking critical tools..."
-
-          for cmd in make bison flex sed tr readlink env nproc ufdt_apply_overlay mkdtboimg.py; do
-            if [ ! -x "$TOOLS/$cmd" ]; then
-              echo "::error::$cmd is missing from Samsung build-tools"
-              exit 1
-            fi
-            echo "$cmd -> $(readlink -f "$TOOLS/$cmd")"
-          done
-
-      # ============================================================
-      # 8. Detect actual kernel source tree
-      # ============================================================
-      - name: Detect kernel source directory
-        shell: bash
-        run: |
-          set -e
-          KERNEL_DIR=""
-
-          if [ -d "$GITHUB_WORKSPACE/kernel_platform/msm-kernel" ]; then
-            KERNEL_DIR="$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
-          elif [ -d "$GITHUB_WORKSPACE/kernel_platform/common" ]; then
-            KERNEL_DIR="$GITHUB_WORKSPACE/kernel_platform/common"
-          else
-            FOUND=$(find "$GITHUB_WORKSPACE/kernel_platform" -maxdepth 3 -type f -name "Makefile" | head -n 1)
-            if [ -n "$FOUND" ]; then
-              KERNEL_DIR="$(dirname "$FOUND")"
-            fi
-          fi
-
-          if [ -z "$KERNEL_DIR" ]; then
-            echo "::error::Unable to detect kernel source directory"
-            exit 1
-          fi
-
-          echo "KERNEL_DIR=$KERNEL_DIR" >> "$GITHUB_ENV"
-          echo "Detected kernel source: $KERNEL_DIR"
-
-      # ============================================================
-      # 9. Integrate KernelSU into actual kernel tree
-      # ============================================================
-      - name: Integrate KernelSU
-        shell: bash
-        run: |
-          set -e
-          cd "$KERNEL_DIR"
-
-          if [ ! -f "Makefile" ] || [ ! -d "drivers" ] || [ ! -f "Kconfig" ]; then
-            echo "::error::Invalid kernel source tree structure at $KERNEL_DIR"
-            exit 1
-          fi
-
-          echo "Running KernelSU setup in: $(pwd)"
+          cd "$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
           curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
 
-          if [ -d "drivers/kernelsu" ] || [ -d "drivers/ksu" ]; then
-            echo "KernelSU driver directory created successfully."
-          else
-            echo "::error::KernelSU driver directory was not created"
-            exit 1
-          fi
-
       # ============================================================
-      # 9.5 Start background resource monitor
+      # 8. 执行三星 GKI 编译
       # ============================================================
-      - name: Start resource monitor
-        shell: bash
-        run: |
-          set -e
-          (
-            while true; do
-              echo "============================================================"
-              echo "RESOURCE MONITOR $(date)"
-              echo "============================================================"
-              echo "--- Memory & Swap ---"
-              free -h
-              echo "--- Swap usage ---"
-              swapon --show || true
-              echo "--- Disk usage ---"
-              df -h "$GITHUB_WORKSPACE"
-              echo "--- Top processes by memory ---"
-              ps -eo pid,ppid,%cpu,%mem,rss,etime,comm --sort=-%mem | head -n 12
-              echo ""
-              sleep 10
-            done
-          ) > "$GITHUB_WORKSPACE/resource-monitor.log" 2>&1 &
-
-          echo $! > /tmp/resource-monitor.pid
-          echo "Resource monitor started with PID: $(cat /tmp/resource-monitor.pid)"
-
-      # ============================================================
-      # 10. Build Samsung GKI kernel
-      # ============================================================
-      - name: Build Samsung GKI kernel
+      - name: 执行三星 GKI 编译
         shell: bash
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
-
           export HERMETIC_TOOLCHAIN=0
           export ADDITIONAL_PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin"
           export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin:$PATH"
-
           export MAKEFLAGS="-j2"
-
-          echo "=========================================="
-          echo "Samsung GKI build"
-          echo "=========================================="
-
           ./build_kernel_GKI.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
       # ============================================================
-      # 10.5 Stop resource monitor
+      # 9. 提取预编译镜像 (Image.lz4)
       # ============================================================
-      - name: Stop resource monitor
-        if: always()
+      - name: 提取预编译镜像 (Image.lz4)
         shell: bash
         run: |
-          set +e
-          if [ -f /tmp/resource-monitor.pid ]; then
-            kill "$(cat /tmp/resource-monitor.pid)" 2>/dev/null || true
-            echo "Resource monitor stopped."
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/prebuilt_kernel"
+          IMAGE_PATH=$(find "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/kernel_platform" -name "Image.lz4" -type f | head -n 1)
+          if [ -n "$IMAGE_PATH" ]; then
+            cp -f "$IMAGE_PATH" "$GITHUB_WORKSPACE/prebuilt_kernel/Image.lz4"
+            echo "成功提取 Image.lz4！"
+          else
+            echo "::error::未找到 Image.lz4 产物！"
+            exit 1
+          fi
+
+          DTBO_PATH=$(find "$GITHUB_WORKSPACE/out" -name "dtbo.img" -type f | head -n 1)
+          if [ -n "$DTBO_PATH" ]; then
+            cp -f "$DTBO_PATH" "$GITHUB_WORKSPACE/prebuilt_kernel/dtbo.img"
           fi
 
       # ============================================================
-      # 11. Upload build artifacts & diagnostics
+      # 10. 发布预编译镜像至 Release 标签 (prebuilt-latest)
       # ============================================================
-      - name: Upload kernel artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: 发布预编译镜像至 Release 标签 (prebuilt-latest)
+        uses: softprops/action-gh-release@v2
         with:
-          name: S22U-Kernel-PhaseA-Result
-          path: |
-            build.log
-            resource-monitor.log
-            kernel_platform/**/Image
-            kernel_platform/**/Image.lz4
-            out/**/vmlinux
-            out/**/dtbo.img
-            out/**/*.log
-          if-no-files-found: warn
+          tag_name: "prebuilt-latest"
+          name: "预编译内核镜像 (Prebuilt Kernel Image)"
+          body: "供 AnyKernel3 极速打包使用的最新预编译 Image.lz4 镜像。"
+          files: prebuilt_kernel/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

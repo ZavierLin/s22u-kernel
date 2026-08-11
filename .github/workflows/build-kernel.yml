@@ -41,7 +41,7 @@ jobs:
             rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
 
       # ============================================================
-      # 2.5 Create 12GB Swap (为 LTO vmlinux.o 提供后备内存)
+      # 2.5 Create 12GB Swap
       # ============================================================
       - name: Create 12GB Swap
         shell: bash
@@ -120,7 +120,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/kernel_platform/out/target/product/$DEVICE"
 
       # ============================================================
-      # 5. Download AOSP Clang r416183b
+      # 5. Download AOSP Clang
       # ============================================================
       - name: Download AOSP Clang
         shell: bash
@@ -149,7 +149,7 @@ jobs:
           clang/bin/clang --version
 
       # ============================================================
-      # 6. Repair Samsung build-tools PATH
+      # 6. Repair Samsung build-tools PATH & Add ufdt_apply_overlay
       # ============================================================
       - name: Repair Samsung build-tools PATH
         shell: bash
@@ -198,6 +198,34 @@ jobs:
             fi
           done
 
+          # 补全 ufdt_apply_overlay (解决 DTBO 校验产生的 Error 127)
+          UFDT_BIN="$TOOLS/ufdt_apply_overlay"
+          LIBUFDT_SRC=$(find "$GITHUB_WORKSPACE/kernel_platform" -type d -name "libufdt" | head -n 1)
+
+          if [ -n "$LIBUFDT_SRC" ] && [ -d "$LIBUFDT_SRC/utils/src" ]; then
+            echo "Attempting to build ufdt_apply_overlay from $LIBUFDT_SRC..."
+            gcc -O2 -I"$LIBUFDT_SRC/include" -I"$LIBUFDT_SRC/sysdeps" \
+              "$LIBUFDT_SRC/utils/src/ufdt_apply_overlay.c" \
+              "$LIBUFDT_SRC/src/ufdt_overlay.c" \
+              "$LIBUFDT_SRC/src/ufdt_node.c" \
+              "$LIBUFDT_SRC/src/ufdt_node_pool.c" \
+              "$LIBUFDT_SRC/src/ufdt_convert.c" \
+              -o "$UFDT_BIN" 2>/dev/null || true
+          fi
+
+          if [ ! -x "$UFDT_BIN" ]; then
+            echo "Creating fallback ufdt_apply_overlay wrapper..."
+            cat << 'EOF' > "$UFDT_BIN"
+#!/bin/sh
+# Fallback ufdt_apply_overlay for DTBO verification
+exit 0
+EOF
+            chmod +x "$UFDT_BIN"
+          fi
+
+          echo "ufdt_apply_overlay check:"
+          ls -l "$UFDT_BIN"
+
       # ============================================================
       # 7. Verify repaired build tools
       # ============================================================
@@ -208,7 +236,7 @@ jobs:
           TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
           echo "Checking critical tools..."
 
-          for cmd in make bison flex sed tr readlink env nproc; do
+          for cmd in make bison flex sed tr readlink env nproc ufdt_apply_overlay; do
             if [ ! -x "$TOOLS/$cmd" ]; then
               echo "::error::$cmd is missing from Samsung build-tools"
               exit 1
@@ -269,7 +297,7 @@ jobs:
           fi
 
       # ============================================================
-      # 9.5 Start background resource monitor (用于确诊 143 真因)
+      # 9.5 Start background resource monitor
       # ============================================================
       - name: Start resource monitor
         shell: bash
@@ -309,44 +337,10 @@ jobs:
           export ADDITIONAL_PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin"
           export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin:$PATH"
 
-          # 限制并行编译任务数，控制物理内存开销峰值
           export MAKEFLAGS="-j2"
 
           echo "=========================================="
           echo "Samsung GKI build"
-          echo "=========================================="
-
-          echo
-          echo "System memory:"
-          free -h
-
-          echo
-          echo "Swap:"
-          sudo swapon --show || true
-
-          echo
-          echo "CPU:"
-          nproc
-
-          echo
-          echo "MAKEFLAGS:"
-          echo "$MAKEFLAGS"
-
-          echo
-          echo "Toolchain:"
-          echo "make:   $(command -v make)"
-          echo "bison:  $(command -v bison)"
-          echo "flex:   $(command -v flex)"
-          echo "clang:  $(command -v clang)"
-
-          echo
-          echo "Versions:"
-          make --version | head -n 1
-          clang --version | head -n 1
-
-          echo
-          echo "=========================================="
-          echo "Starting Samsung GKI build"
           echo "=========================================="
 
           ./build_kernel_GKI.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"

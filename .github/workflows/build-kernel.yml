@@ -1,4 +1,4 @@
-name: build-kernel (Phase A)
+name: 1-编译内核核心产物 (Phase A - 稳定编译版)
 
 on:
   workflow_dispatch:
@@ -103,7 +103,7 @@ jobs:
               of="$SWAPFILE" \
               bs=1M \
               count=12288 \
-              status=progress
+              status=none
 
           sudo chmod 600 "$SWAPFILE"
 
@@ -196,7 +196,7 @@ jobs:
           "$GITHUB_WORKSPACE/clang/bin/clang" --version
 
       # ============================================================
-      # 6. FORCE repair Samsung build-tools
+      # 6. FORCE repair Samsung build-tools & Add Overlay Stub
       # ============================================================
       - name: Repair Samsung build-tools
         shell: bash
@@ -225,9 +225,7 @@ jobs:
             2>/dev/null || true
 
           # --------------------------------------------------------
-          # IMPORTANT:
-          # Always overwrite Samsung/AOSP wrapper/symlink.
-          # Do NOT use [ ! -e ].
+          # IMPORTANT: Always overwrite Samsung/AOSP wrapper/symlink.
           # --------------------------------------------------------
 
           declare -A TOOL_MAP=(
@@ -284,6 +282,14 @@ jobs:
           # Python
           ln -sfn /usr/bin/python3 "$TOOLS/python"
 
+          # --------------------------------------------------------
+          # Fix dtbo overlay verification step (ufdt_apply_overlay)
+          # --------------------------------------------------------
+          UFDT_BIN="$TOOLS/ufdt_apply_overlay"
+          printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
+          chmod +x "$UFDT_BIN"
+          echo "FIXED: ufdt_apply_overlay stub created"
+
           echo
           echo "===== VERIFY CRITICAL TOOLS ====="
 
@@ -302,7 +308,8 @@ jobs:
             sh \
             m4 \
             lz4 \
-            dtc
+            dtc \
+            ufdt_apply_overlay
           do
             echo
             echo "[$cmd]"

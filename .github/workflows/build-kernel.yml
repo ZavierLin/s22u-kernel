@@ -95,7 +95,7 @@ jobs:
           rm -rf clang-repo
 
       # ============================================================
-      # 6. 全量补齐 build-tools 与 AOSP 脚本 (通过 Base64 解码，彻底规避 YAML 缩进错位)
+      # 6. 全量补齐 build-tools 与 AOSP 脚本 (补充 Python Shebang)
       # ============================================================
       - name: 全量补齐 build-tools 与 AOSP 脚本
         shell: bash
@@ -152,16 +152,17 @@ jobs:
           fi
           chmod +x "$MKDTBO_BIN"
 
-          # 5. 补齐 mkbootfs (通过 Base64 还原纯净 Python 脚本，彻底解决多行缩进破损)
+          # 5. 补齐 mkbootfs (已包含 #!/usr/bin/env python3 声明)
           MKBOOTFS_BIN="$TOOLS/mkbootfs"
           rm -f "$MKBOOTFS_BIN"
-          echo "aW1wb3J0IHN5cywgb3MsIHN1YnByb2Nlc3MKCmFyZ3MgPSBzeXMuYXJndlsxOl0KZGlycyA9IFtdCmkgPSAwCndoaWxlIGkgPCBsZW4oYXJncyk6CiAgICBhcmcgPSBhcmdzW2ldCiAgICBpZiBhcmcgaW4gKCctZCcsICctZicsICctYycpOgogICAgICAgIGkgKz0gMgogICAgZWxpZiBhcmcuc3RhcnRzd2l0aCgnLScpOgogICAgICAgIGkgKz0gMQogICAgZWxzZToKICAgICAgICBkaXJzLmFwcGVuZChhcmcpCiAgICAgICAgaSArPSAxCgppZiBub3QgZGlyczoKICAgIHN5cy5leGl0KDApCgpmb3IgZCBpbiBkaXJzOgogICAgaWYgb3MucGF0aC5leGlzdHMoZCk6CiAgICAgICAgY21kID0gZiJjZCAne2R9JyAmJiBmaW5kIC4gLW1pbmRlcHRoIDEgfCBjcGlvIC1vIC1IIG5ld2MgLS1xdWlldCIKICAgICAgICBzdWJwcm9jZXNzLnJ1bihjbWQsIHNoZWxsPVRydWUpCg==" | base64 -d > "$MKBOOTFS_BIN"
+          echo "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwppbXBvcnQgc3lzLCBvcywgc3VicHJvY2VzcwoKYXJncyA9IHN5cy5hcmd2WzE6XQpkaXJzID0gW10KaSA9IDAKd2hpbGUgaSA8IGxlbihhcmdzKToKICAgIGFyZyA9IGFyZ3NbaV0KICAgIGlmIGFyZyBpbiAoJy1kJywgJy1mJywgJy1jJyk6CiAgICAgICAgaSArPSAyCiAgICBlbGlmIGFyZy5zdGFydHN3aXRoKCctJyk6CiAgICAgICAgaSArPSAxCiAgICBlbHNlOgogICAgICAgIGRpcnMuYXBwZW5kKGFyZykKICAgICAgICBpICs9IDEKCmlmIG5vdCBkaXJzOgogICAgc3lzLmV4aXQoMCkKCmZvciBkIGluIGRpcnM6CiAgICBpZiBvcy5wYXRoLmV4aXN0cyhkKToKICAgICAgICBjbWQgPSBmImNkICd7ZH0nICYmIGZpbmQgLiAtbWluZGVwdGggMSB8IGNwaW8gLW8gLUggbmV3YyAtLXF1aWV0IgogICAgICAgIHN1YnByb2Nlc3MucnVuKGNtZCwgc2hlbGw9VHJ1ZSkK" | base64 -d > "$MKBOOTFS_BIN"
           chmod +x "$MKBOOTFS_BIN"
 
           echo "===== 校验关键工具 ====="
           ls -l "$TOOLS/ld.lld"
           ls -l "$TOOLS/mkdtboimg.py"
           ls -l "$TOOLS/mkbootfs"
+          head -n 2 "$TOOLS/mkbootfs"
 
       # ============================================================
       # 7. 双重注入 KernelSU 至 common 和 msm-kernel 源码树

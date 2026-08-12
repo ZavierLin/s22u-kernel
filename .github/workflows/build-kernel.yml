@@ -1,4 +1,4 @@
-name: build-kernel (Phase A)
+name: 1-编译内核核心产物 (Phase A)
 
 on:
   workflow_dispatch:
@@ -111,7 +111,7 @@ jobs:
 
           for dir in /usr/bin /bin; do
             for file in "$dir"/*; do
-              if [ -x "$file" ] && [ -f "$file" ]; me
+              if [ -x "$file" ] && [ -f "$file" ]; then
                 cmd=$(basename "$file")
                 ln -sf "$file" "$TOOLS/$cmd"
               fi
@@ -143,15 +143,13 @@ jobs:
         shell: bash
         run: |
           set -e
-          
-          # 1. 优先注入 GKI 主源码树 (common)
+
           if [ -d "$GITHUB_WORKSPACE/kernel_platform/common" ]; then
             echo "正在注入 KernelSU 至 common 源码树..."
             cd "$GITHUB_WORKSPACE/kernel_platform/common"
             curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
           fi
 
-          # 2. 注入 Vendor 源码树 (msm-kernel)
           if [ -d "$GITHUB_WORKSPACE/kernel_platform/msm-kernel" ]; then
             echo "正在注入 KernelSU 至 msm-kernel 源码树..."
             cd "$GITHUB_WORKSPACE/kernel_platform/msm-kernel"

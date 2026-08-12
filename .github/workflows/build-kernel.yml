@@ -95,7 +95,7 @@ jobs:
           rm -rf clang-repo
 
       # ============================================================
-      # 6. 全量补齐 build-tools，精准绑定 AOSP Clang 与 LLD
+      # 6. 全量补齐 build-tools 与 AOSP 官方打包工具链 (含 mkbootfs)
       # ============================================================
       - name: 全量补齐 build-tools 与 AOSP 脚本
         shell: bash
@@ -109,7 +109,7 @@ jobs:
           find "$TOOLS" -type f -delete 2>/dev/null || true
           find "$GITHUB_WORKSPACE" -name "build.config*" -exec sed -i 's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' {} + 2>/dev/null || true
 
-          # 1. 优先把 AOSP Clang 工具链 (clang, ld.lld, llvm-*) 绑定进 TOOLS
+          # 1. 优先绑定 AOSP Clang 工具链
           if [ -d "$GITHUB_WORKSPACE/clang/bin" ]; then
             for file in "$GITHUB_WORKSPACE/clang/bin"/*; do
               if [ -x "$file" ] && [ -f "$file" ]; then
@@ -119,8 +119,8 @@ jobs:
             done
           fi
 
-          # 2. 精准链接宿主机工具 (避开 ld.lld/llvm-*，防止版本覆盖)
-          REQUIRED_HOST_TOOLS="make bison flex env nproc sed readlink tr awk grep egrep fgrep bash sh m4 lz4 dtc bc"
+          # 2. 精准链接宿主机编译工具
+          REQUIRED_HOST_TOOLS="make bison flex env nproc sed readlink tr awk grep egrep fgrep bash sh m4 lz4 dtc bc cpio"
           for cmd in $REQUIRED_HOST_TOOLS; do
             HOST_CMD=""
             if [ -x "/usr/bin/$cmd" ]; then
@@ -135,13 +135,14 @@ jobs:
 
           ln -sf /usr/bin/python3 "$TOOLS/python"
 
+          # 3. 补齐 ufdt_apply_overlay
           UFDT_BIN="$TOOLS/ufdt_apply_overlay"
           printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
           chmod +x "$UFDT_BIN"
 
+          # 4. 补齐 mkdtboimg.py
           MKDTBO_BIN="$TOOLS/mkdtboimg.py"
           rm -f "$MKDTBO_BIN"
-
           FOUND_MKDTBO=$(find "$GITHUB_WORKSPACE" -type f -name "mkdtboimg.py" | head -n 1)
           if [ -n "$FOUND_MKDTBO" ]; then
             cp -f "$FOUND_MKDTBO" "$MKDTBO_BIN"
@@ -151,8 +152,18 @@ jobs:
           fi
           chmod +x "$MKDTBO_BIN"
 
-          echo "===== 校验链接器版本 ====="
-          "$TOOLS/ld.lld" --version || true
+          # 5. 补齐 mkbootfs 官方二进制 (解决 build.sh line 1154: mkbootfs: command not found)
+          MKBOOTFS_BIN="$TOOLS/mkbootfs"
+          rm -f "$MKBOOTFS_BIN"
+          echo "Fetching official mkbootfs binary from Googlesource..."
+          curl -s "https://android.googlesource.com/platform/prebuilts/build-tools/+/refs/heads/main/linux-x86/bin/mkbootfs?format=TEXT" | base64 -d > "$MKBOOTFS_BIN"
+          chmod +x "$MKBOOTFS_BIN"
+
+          echo "===== 校验关键工具 ====="
+          ls -l "$TOOLS/ld.lld"
+          ls -l "$TOOLS/mkdtboimg.py"
+          ls -l "$TOOLS/mkbootfs"
+          "$TOOLS/mkbootfs" --help 2>&1 | head -n 2 || true
 
       # ============================================================
       # 7. 双重注入 KernelSU 至 common 和 msm-kernel 源码树

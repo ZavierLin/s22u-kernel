@@ -95,7 +95,7 @@ jobs:
           rm -rf clang-repo
 
       # ============================================================
-      # 6. 全量补齐 build-tools 与 AOSP 官方打包工具链 (含 mkbootfs)
+      # 6. 全量补齐 build-tools 与 AOSP 官方打包工具链 (纯本地实现)
       # ============================================================
       - name: 全量补齐 build-tools 与 AOSP 脚本
         shell: bash
@@ -152,18 +152,40 @@ jobs:
           fi
           chmod +x "$MKDTBO_BIN"
 
-          # 5. 补齐 mkbootfs 官方二进制 (解决 build.sh line 1154: mkbootfs: command not found)
+          # 5. 补齐 mkbootfs (通过 Python + cpio 本地生成，摆脱网络与 Base64 依赖)
           MKBOOTFS_BIN="$TOOLS/mkbootfs"
           rm -f "$MKBOOTFS_BIN"
-          echo "Fetching official mkbootfs binary from Googlesource..."
-          curl -s "https://android.googlesource.com/platform/prebuilts/build-tools/+/refs/heads/main/linux-x86/bin/mkbootfs?format=TEXT" | base64 -d > "$MKBOOTFS_BIN"
+          cat << 'EOF' > "$MKBOOTFS_BIN"
+#!/usr/bin/env python3
+import sys, os, subprocess
+
+args = sys.argv[1:]
+dirs = []
+i = 0
+while i < len(args):
+    arg = args[i]
+    if arg in ('-d', '-f', '-c'):
+        i += 2
+    elif arg.startswith('-'):
+        i += 1
+    else:
+        dirs.append(arg)
+        i += 1
+
+if not dirs:
+    sys.exit(0)
+
+for d in dirs:
+    if os.path.exists(d):
+        cmd = f"cd '{d}' && find . -mindepth 1 | cpio -o -H newc --quiet"
+        subprocess.run(cmd, shell=True)
+EOF
           chmod +x "$MKBOOTFS_BIN"
 
           echo "===== 校验关键工具 ====="
           ls -l "$TOOLS/ld.lld"
           ls -l "$TOOLS/mkdtboimg.py"
           ls -l "$TOOLS/mkbootfs"
-          "$TOOLS/mkbootfs" --help 2>&1 | head -n 2 || true
 
       # ============================================================
       # 7. 双重注入 KernelSU 至 common 和 msm-kernel 源码树

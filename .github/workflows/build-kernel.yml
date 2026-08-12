@@ -1,4 +1,4 @@
-name: 1-编译内核核心产物 (Phase A)
+name: build-kernel (Phase A)
 
 on:
   workflow_dispatch:
@@ -16,232 +16,670 @@ jobs:
       ANDROID_CLANG_BRANCH: android12L-release
 
     steps:
+
       # ============================================================
-      # 1. 检出源码
+      # 1. Checkout
       # ============================================================
-      - name: 检出源码
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ============================================================
-      # 2. 安装构建依赖
+      # 2. Install build dependencies
       # ============================================================
-      - name: 安装构建依赖
+      - name: Install build dependencies
         shell: bash
         run: |
-          set -e
+          set -euxo pipefail
+
           sudo apt-get update
+
           sudo apt-get install -y \
-            bc bison flex build-essential gcc g++ make \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
-            libssl-dev libelf-dev libdw-dev python3 python3-pip \
-            rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
+            bc \
+            bison \
+            flex \
+            build-essential \
+            gcc \
+            g++ \
+            make \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            binutils-arm-linux-gnueabi \
+            libssl-dev \
+            libelf-dev \
+            libdw-dev \
+            python3 \
+            python3-pip \
+            rsync \
+            cpio \
+            unzip \
+            zip \
+            wget \
+            curl \
+            git \
+            file \
+            xz-utils \
+            lz4 \
+            device-tree-compiler
+
+          echo "===== Host tools ====="
+          command -v make
+          command -v bison
+          command -v flex
+          command -v clang || true
+
+          make --version | head -n 1
+          bison --version | head -n 1
+          flex --version | head -n 1
 
       # ============================================================
-      # 2.5 创建 12GB Swap
+      # 2.5 Create 12GB swap
       # ============================================================
-      - name: 创建 12GB Swap
+      - name: Create 12GB swap
         shell: bash
         run: |
-          set -e
-          echo "===== 准备清理并重新创建 Swap ====="
+          set -euxo pipefail
+
+          echo "===== BEFORE SWAP ====="
           free -h
+          swapon --show || true
 
           sudo swapoff -a || true
-          sudo rm -f /swapfile /mnt/swapfile /swapfile_12g || true
+
+          sudo rm -f \
+            /swapfile \
+            /swapfile_12g \
+            /mnt/swapfile
 
           SWAPFILE="/swapfile_12g"
-          echo "正在分配 12GB Swap 空间..."
-          sudo fallocate -l 12G "$SWAPFILE" || sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=12288
+
+          echo "Creating 12GB swap..."
+
+          sudo fallocate -l 12G "$SWAPFILE" || \
+            sudo dd \
+              if=/dev/zero \
+              of="$SWAPFILE" \
+              bs=1M \
+              count=12288 \
+              status=progress
 
           sudo chmod 600 "$SWAPFILE"
+
           sudo mkswap "$SWAPFILE"
           sudo swapon "$SWAPFILE"
 
-          echo "===== Swap 扩展成功 ====="
+          echo "===== AFTER SWAP ====="
+          swapon --show
           free -h
 
       # ============================================================
-      # 3. 解压内核源码
+      # 3. Extract Samsung kernel source
       # ============================================================
-      - name: 解压内核源码
+      - name: Extract Samsung kernel source
         shell: bash
         run: |
-          set -e
-          ARCHIVE=$(find "$GITHUB_WORKSPACE" -name "S9080ZHS9GZA1_kernel.tar.gz" -type f | head -n 1)
-          tar -xzf "$ARCHIVE" -C "$GITHUB_WORKSPACE"
+          set -euxo pipefail
 
-      # ============================================================
-      # 4. 准备输出目录
-      # ============================================================
-      - name: 准备输出目录
-        shell: bash
-        run: |
-          set -e
-          mkdir -p "$GITHUB_WORKSPACE/out/target/product/$DEVICE"
-          mkdir -p "$GITHUB_WORKSPACE/kernel_platform/out/target/product/$DEVICE"
+          ARCHIVE=$(find \
+            "$GITHUB_WORKSPACE" \
+            -name "S9080ZHS9GZA1_kernel.tar.gz" \
+            -type f \
+            -print -quit)
 
-      # ============================================================
-      # 5. 下载 AOSP Clang
-      # ============================================================
-      - name: 下载 AOSP Clang
-        shell: bash
-        run: |
-          set -e
-          cd "$GITHUB_WORKSPACE"
-          mkdir -p clang
-          git clone --depth=1 --branch "$ANDROID_CLANG_BRANCH" https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang-repo
-          cp -a clang-repo/$CLANG_VERSION/. clang/
-          rm -rf clang-repo
-
-      # ============================================================
-      # 6. 全量补齐 build-tools 与 AOSP 脚本 (补充 Python Shebang)
-      # ============================================================
-      - name: 全量补齐 build-tools 与 AOSP 脚本
-        shell: bash
-        run: |
-          set -e
-
-          TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
-          mkdir -p "$TOOLS"
-
-          find "$TOOLS" -type l -delete 2>/dev/null || true
-          find "$TOOLS" -type f -delete 2>/dev/null || true
-          find "$GITHUB_WORKSPACE" -name "build.config*" -exec sed -i 's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' {} + 2>/dev/null || true
-
-          # 1. 优先绑定 AOSP Clang 工具链
-          if [ -d "$GITHUB_WORKSPACE/clang/bin" ]; then
-            for file in "$GITHUB_WORKSPACE/clang/bin"/*; do
-              if [ -x "$file" ] && [ -f "$file" ]; then
-                cmd=$(basename "$file")
-                ln -sf "$file" "$TOOLS/$cmd"
-              fi
-            done
-          fi
-
-          # 2. 精准链接宿主机编译工具
-          REQUIRED_HOST_TOOLS="make bison flex env nproc sed readlink tr awk grep egrep fgrep bash sh m4 lz4 dtc bc cpio"
-          for cmd in $REQUIRED_HOST_TOOLS; do
-            HOST_CMD=""
-            if [ -x "/usr/bin/$cmd" ]; then
-              HOST_CMD="/usr/bin/$cmd"
-            elif [ -x "/bin/$cmd" ]; then
-              HOST_CMD="/bin/$cmd"
-            fi
-            if [ -n "$HOST_CMD" ]; then
-              ln -sf "$HOST_CMD" "$TOOLS/$cmd"
-            fi
-          done
-
-          ln -sf /usr/bin/python3 "$TOOLS/python"
-
-          # 3. 补齐 ufdt_apply_overlay
-          UFDT_BIN="$TOOLS/ufdt_apply_overlay"
-          printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
-          chmod +x "$UFDT_BIN"
-
-          # 4. 补齐 mkdtboimg.py
-          MKDTBO_BIN="$TOOLS/mkdtboimg.py"
-          rm -f "$MKDTBO_BIN"
-          FOUND_MKDTBO=$(find "$GITHUB_WORKSPACE" -type f -name "mkdtboimg.py" | head -n 1)
-          if [ -n "$FOUND_MKDTBO" ]; then
-            cp -f "$FOUND_MKDTBO" "$MKDTBO_BIN"
-          else
-            echo "Fetching official mkdtboimg.py from Googlesource..."
-            curl -s "https://android.googlesource.com/platform/system/libufdt/+/refs/heads/main/utils/src/mkdtboimg.py?format=TEXT" | base64 -d > "$MKDTBO_BIN"
-          fi
-          chmod +x "$MKDTBO_BIN"
-
-          # 5. 补齐 mkbootfs (已包含 #!/usr/bin/env python3 声明)
-          MKBOOTFS_BIN="$TOOLS/mkbootfs"
-          rm -f "$MKBOOTFS_BIN"
-          echo "IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwppbXBvcnQgc3lzLCBvcywgc3VicHJvY2VzcwoKYXJncyA9IHN5cy5hcmd2WzE6XQpkaXJzID0gW10KaSA9IDAKd2hpbGUgaSA8IGxlbihhcmdzKToKICAgIGFyZyA9IGFyZ3NbaV0KICAgIGlmIGFyZyBpbiAoJy1kJywgJy1mJywgJy1jJyk6CiAgICAgICAgaSArPSAyCiAgICBlbGlmIGFyZy5zdGFydHN3aXRoKCctJyk6CiAgICAgICAgaSArPSAxCiAgICBlbHNlOgogICAgICAgIGRpcnMuYXBwZW5kKGFyZykKICAgICAgICBpICs9IDEKCmlmIG5vdCBkaXJzOgogICAgc3lzLmV4aXQoMCkKCmZvciBkIGluIGRpcnM6CiAgICBpZiBvcy5wYXRoLmV4aXN0cyhkKToKICAgICAgICBjbWQgPSBmImNkICd7ZH0nICYmIGZpbmQgLiAtbWluZGVwdGggMSB8IGNwaW8gLW8gLUggbmV3YyAtLXF1aWV0IgogICAgICAgIHN1YnByb2Nlc3MucnVuKGNtZCwgc2hlbGw9VHJ1ZSkK" | base64 -d > "$MKBOOTFS_BIN"
-          chmod +x "$MKBOOTFS_BIN"
-
-          echo "===== 校验关键工具 ====="
-          ls -l "$TOOLS/ld.lld"
-          ls -l "$TOOLS/mkdtboimg.py"
-          ls -l "$TOOLS/mkbootfs"
-          head -n 2 "$TOOLS/mkbootfs"
-
-      # ============================================================
-      # 7. 双重注入 KernelSU 至 common 和 msm-kernel 源码树
-      # ============================================================
-      - name: 集成 KernelSU
-        shell: bash
-        run: |
-          set -e
-
-          if [ -d "$GITHUB_WORKSPACE/kernel_platform/common" ]; then
-            echo "正在注入 KernelSU 至 common 源码树..."
-            cd "$GITHUB_WORKSPACE/kernel_platform/common"
-            curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
-          fi
-
-          if [ -d "$GITHUB_WORKSPACE/kernel_platform/msm-kernel" ]; then
-            echo "正在注入 KernelSU 至 msm-kernel 源码树..."
-            cd "$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
-            curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
-          fi
-
-      # ============================================================
-      # 8. 执行三星 GKI 编译
-      # ============================================================
-      - name: 执行三星 GKI 编译
-        shell: bash
-        run: |
-          set -e
-          cd "$GITHUB_WORKSPACE"
-          export HERMETIC_TOOLCHAIN=0
-          export ADDITIONAL_PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin"
-          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin:$PATH"
-          export MAKEFLAGS="-j2"
-          ./build_kernel_GKI.sh 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-
-      # ============================================================
-      # 9. 提取预编译镜像 (Image.lz4)
-      # ============================================================
-      - name: 提取预编译镜像 (Image.lz4)
-        if: success()
-        shell: bash
-        run: |
-          set -e
-          mkdir -p "$GITHUB_WORKSPACE/prebuilt_kernel"
-          IMAGE_PATH=$(find "$GITHUB_WORKSPACE/out" "$GITHUB_WORKSPACE/kernel_platform" -name "Image.lz4" -type f | head -n 1)
-          if [ -n "$IMAGE_PATH" ]; then
-            cp -f "$IMAGE_PATH" "$GITHUB_WORKSPACE/prebuilt_kernel/Image.lz4"
-            echo "成功提取 Image.lz4！"
-          else
-            echo "::error::未找到 Image.lz4 产物！"
+          if [ -z "$ARCHIVE" ]; then
+            echo "::error::S9080ZHS9GZA1_kernel.tar.gz not found"
             exit 1
           fi
 
-          DTBO_PATH=$(find "$GITHUB_WORKSPACE/out" -name "dtbo.img" -type f | head -n 1)
+          echo "Found source archive:"
+          echo "$ARCHIVE"
+
+          tar -xzf "$ARCHIVE" \
+            -C "$GITHUB_WORKSPACE"
+
+          echo "===== kernel_platform ====="
+          ls -lah "$GITHUB_WORKSPACE/kernel_platform" || true
+
+      # ============================================================
+      # 4. Prepare directories
+      # ============================================================
+      - name: Prepare build directories
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/out/target/product/$DEVICE"
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/kernel_platform/out/target/product/$DEVICE"
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/prebuilt_kernel"
+
+      # ============================================================
+      # 5. Download AOSP Clang
+      # ============================================================
+      - name: Download AOSP Clang
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$GITHUB_WORKSPACE"
+
+          rm -rf clang clang-repo
+
+          mkdir -p clang
+
+          git clone \
+            --depth=1 \
+            --branch "$ANDROID_CLANG_BRANCH" \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            clang-repo
+
+          if [ ! -d "clang-repo/$CLANG_VERSION" ]; then
+            echo "::error::$CLANG_VERSION not found"
+            find clang-repo -maxdepth 1 -type d
+            exit 1
+          fi
+
+          cp -a \
+            "clang-repo/$CLANG_VERSION/." \
+            clang/
+
+          rm -rf clang-repo
+
+          echo "===== Clang ====="
+
+          "$GITHUB_WORKSPACE/clang/bin/clang" --version
+
+      # ============================================================
+      # 6. FORCE repair Samsung build-tools
+      # ============================================================
+      - name: Repair Samsung build-tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TOOLS="$GITHUB_WORKSPACE/kernel_platform/build/build-tools/path/linux-x86"
+
+          mkdir -p "$TOOLS"
+
+          echo "=========================================="
+          echo "FORCE REPAIR Samsung build-tools"
+          echo "=========================================="
+
+          echo "TOOLS=$TOOLS"
+
+          # --------------------------------------------------------
+          # Disable Hermetic toolchain configuration where possible
+          # --------------------------------------------------------
+          find "$GITHUB_WORKSPACE" \
+            -name "build.config*" \
+            -type f \
+            -exec sed -i \
+              's/HERMETIC_TOOLCHAIN=1/HERMETIC_TOOLCHAIN=0/g' \
+              {} + \
+            2>/dev/null || true
+
+          # --------------------------------------------------------
+          # IMPORTANT:
+          # Always overwrite Samsung/AOSP wrapper/symlink.
+          # Do NOT use [ ! -e ].
+          # --------------------------------------------------------
+
+          declare -A TOOL_MAP=(
+            [make]="/usr/bin/make"
+            [bison]="/usr/bin/bison"
+            [flex]="/usr/bin/flex"
+            [env]="/usr/bin/env"
+            [nproc]="/usr/bin/nproc"
+            [sed]="/usr/bin/sed"
+            [readlink]="/usr/bin/readlink"
+            [tr]="/usr/bin/tr"
+            [awk]="/usr/bin/awk"
+            [grep]="/usr/bin/grep"
+            [egrep]="/usr/bin/egrep"
+            [fgrep]="/usr/bin/fgrep"
+            [bash]="/usr/bin/bash"
+            [sh]="/usr/bin/sh"
+            [m4]="/usr/bin/m4"
+            [lz4]="/usr/bin/lz4"
+            [dtc]="/usr/bin/dtc"
+            [bc]="/usr/bin/bc"
+            [cpio]="/usr/bin/cpio"
+            [gzip]="/usr/bin/gzip"
+            [tar]="/usr/bin/tar"
+            [find]="/usr/bin/find"
+            [sort]="/usr/bin/sort"
+            [cut]="/usr/bin/cut"
+            [head]="/usr/bin/head"
+            [tail]="/usr/bin/tail"
+            [dirname]="/usr/bin/dirname"
+            [basename]="/usr/bin/basename"
+            [mkdir]="/usr/bin/mkdir"
+            [rm]="/usr/bin/rm"
+            [cp]="/usr/bin/cp"
+            [mv]="/usr/bin/mv"
+            [cat]="/usr/bin/cat"
+            [printf]="/usr/bin/printf"
+          )
+
+          for cmd in "${!TOOL_MAP[@]}"; do
+            HOST_CMD="${TOOL_MAP[$cmd]}"
+
+            if [ ! -x "$HOST_CMD" ]; then
+              echo "::error::Missing host command: $HOST_CMD"
+              exit 1
+            fi
+
+            # Force replacement
+            ln -sfn "$HOST_CMD" "$TOOLS/$cmd"
+
+            echo "FIXED: $cmd -> $HOST_CMD"
+          done
+
+          # Python
+          ln -sfn /usr/bin/python3 "$TOOLS/python"
+
+          echo
+          echo "===== VERIFY CRITICAL TOOLS ====="
+
+          for cmd in \
+            make \
+            bison \
+            flex \
+            env \
+            nproc \
+            sed \
+            readlink \
+            tr \
+            awk \
+            grep \
+            bash \
+            sh \
+            m4 \
+            lz4 \
+            dtc
+          do
+            echo
+            echo "[$cmd]"
+
+            ls -l "$TOOLS/$cmd"
+
+            if command -v readlink >/dev/null 2>&1; then
+              readlink -f "$TOOLS/$cmd"
+            fi
+
+            "$TOOLS/$cmd" --version 2>/dev/null | head -n 1 || true
+          done
+
+          echo
+          echo "===== DIRECT HOST TOOL CHECK ====="
+
+          /usr/bin/make --version | head -n 1
+          /usr/bin/bison --version | head -n 1
+          /usr/bin/flex --version | head -n 1
+
+      # ============================================================
+      # 7. Verify kernel source
+      # ============================================================
+      - name: Verify kernel source
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          KERNEL_SRC="$GITHUB_WORKSPACE/kernel_platform/common"
+
+          if [ ! -f "$KERNEL_SRC/Makefile" ]; then
+            echo "::error::common/Makefile missing"
+            exit 1
+          fi
+
+          if [ ! -d "$KERNEL_SRC/drivers" ]; then
+            echo "::error::common/drivers missing"
+            exit 1
+          fi
+
+          if [ ! -f "$KERNEL_SRC/Kconfig" ]; then
+            echo "::error::common/Kconfig missing"
+            exit 1
+          fi
+
+          echo "Kernel source:"
+          echo "$KERNEL_SRC"
+
+          echo
+          echo "===== KERNEL VERSION ====="
+
+          grep -E \
+            '^(VERSION|PATCHLEVEL|SUBLEVEL) =' \
+            "$KERNEL_SRC/Makefile" || true
+
+      # ============================================================
+      # 8. Integrate KernelSU
+      # ============================================================
+      - name: Integrate KernelSU
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          KERNEL_SRC="$GITHUB_WORKSPACE/kernel_platform/common"
+
+          cd "$KERNEL_SRC"
+
+          echo "Kernel source:"
+          pwd
+
+          echo "===== KernelSU setup ====="
+
+          curl -LSs \
+            https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh \
+            | bash -s main
+
+          echo
+          echo "===== KernelSU verification ====="
+
+          if [ ! -d "$KERNEL_SRC/drivers/kernelsu" ]; then
+            echo "::error::drivers/kernelsu was not created"
+            exit 1
+          fi
+
+          echo "KernelSU directory:"
+          ls -lah "$KERNEL_SRC/drivers/kernelsu"
+
+          echo
+          echo "KernelSU references:"
+
+          grep -R \
+            -n \
+            -i \
+            "kernelsu" \
+            Kconfig \
+            drivers/Kconfig \
+            2>/dev/null || true
+
+      # ============================================================
+      # 9. Samsung GKI build
+      # ============================================================
+      - name: Build Samsung GKI kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE"
+
+          echo "=========================================="
+          echo "Samsung GKI kernel build"
+          echo "=========================================="
+
+          # --------------------------------------------------------
+          # Toolchain environment
+          # --------------------------------------------------------
+
+          export HERMETIC_TOOLCHAIN=0
+
+          export ADDITIONAL_PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin"
+
+          export PATH="$GITHUB_WORKSPACE/clang/bin:/usr/bin:/bin:$PATH"
+
+          # --------------------------------------------------------
+          # Build concurrency
+          # --------------------------------------------------------
+
+          export MAKEFLAGS="-j2"
+
+          # Keep LTO effectively single-threaded where supported.
+          export LLVM_PARALLEL_COMPILE_JOBS=2
+          export LLVM_PARALLEL_LINK_JOBS=1
+
+          # --------------------------------------------------------
+          # Print environment
+          # --------------------------------------------------------
+
+          echo
+          echo "===== TOOLCHAIN ====="
+
+          echo "make:"
+          command -v make
+          make --version | head -n 1
+
+          echo
+          echo "bison:"
+          command -v bison
+          bison --version | head -n 1
+
+          echo
+          echo "flex:"
+          command -v flex
+          flex --version | head -n 1
+
+          echo
+          echo "clang:"
+          command -v clang
+          clang --version | head -n 3
+
+          echo
+          echo "===== MEMORY ====="
+          free -h
+
+          echo
+          echo "===== SWAP ====="
+          swapon --show
+
+          # --------------------------------------------------------
+          # Resource monitor
+          # --------------------------------------------------------
+
+          (
+            while true; do
+              echo
+              echo "=========================================="
+              echo "RESOURCE $(date '+%Y-%m-%d %H:%M:%S')"
+              echo "=========================================="
+
+              free -h
+
+              echo
+              echo "--- SWAP ---"
+              swapon --show
+
+              echo
+              echo "--- LOAD ---"
+              uptime
+
+              echo
+              echo "--- MEMORY TOP ---"
+              ps -eo \
+                pid,ppid,%mem,rss,vsz,stat,comm \
+                --sort=-%mem \
+                | head -n 15
+
+              sleep 10
+            done
+          ) > "$GITHUB_WORKSPACE/resource.log" 2>&1 &
+
+          MONITOR_PID=$!
+
+          trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+
+          # --------------------------------------------------------
+          # Build
+          # --------------------------------------------------------
+
+          echo
+          echo "===== START BUILD ====="
+
+          ./build_kernel_GKI.sh \
+            2>&1 \
+            | tee "$GITHUB_WORKSPACE/build.log"
+
+      # ============================================================
+      # 10. Diagnose exit / locate Image
+      # ============================================================
+      - name: Locate kernel output
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          echo "=========================================="
+          echo "Searching kernel output"
+          echo "=========================================="
+
+          echo
+          echo "===== Image ====="
+
+          find "$GITHUB_WORKSPACE" \
+            -type f \
+            \( \
+              -name "Image" \
+              -o \
+              -name "Image.lz4" \
+            \) \
+            -print \
+            2>/dev/null \
+            | head -n 100
+
+          echo
+          echo "===== vmlinux ====="
+
+          find "$GITHUB_WORKSPACE" \
+            -type f \
+            -name "vmlinux" \
+            -print \
+            2>/dev/null \
+            | head -n 50
+
+          echo
+          echo "===== dist ====="
+
+          find "$GITHUB_WORKSPACE" \
+            -type d \
+            -name "dist" \
+            -print \
+            2>/dev/null \
+            | head -n 50
+
+          echo
+          echo "===== MEMORY ====="
+
+          free -h
+
+          echo
+          echo "===== SWAP ====="
+
+          swapon --show
+
+      # ============================================================
+      # 11. Extract Image.lz4
+      # ============================================================
+      - name: Extract Image.lz4
+        if: always()
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$GITHUB_WORKSPACE/prebuilt_kernel"
+
+          IMAGE_PATH=""
+
+          for candidate in \
+            "$GITHUB_WORKSPACE/out/msm-waipio-waipio-gki/dist/Image.lz4" \
+            "$GITHUB_WORKSPACE/out/msm-waipio-waipio-gki/gki_kernel/dist/Image.lz4" \
+            "$GITHUB_WORKSPACE/kernel_platform/out/msm-waipio-waipio-gki/dist/Image.lz4"
+          do
+            if [ -f "$candidate" ]; then
+              IMAGE_PATH="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$IMAGE_PATH" ]; then
+            IMAGE_PATH=$(
+              find \
+                "$GITHUB_WORKSPACE/out" \
+                "$GITHUB_WORKSPACE/kernel_platform" \
+                -path "*/dist/Image.lz4" \
+                -type f \
+                -print \
+                2>/dev/null \
+                | head -n 1
+            )
+          fi
+
+          if [ -n "$IMAGE_PATH" ]; then
+
+            echo "Found:"
+            echo "$IMAGE_PATH"
+
+            cp -f \
+              "$IMAGE_PATH" \
+              "$GITHUB_WORKSPACE/prebuilt_kernel/Image.lz4"
+
+            echo "Image.lz4 extracted."
+
+          else
+            echo "::warning::Image.lz4 not found"
+          fi
+
+          DTBO_PATH=$(
+            find \
+              "$GITHUB_WORKSPACE/out" \
+              -name "dtbo.img" \
+              -type f \
+              -print \
+              2>/dev/null \
+              | head -n 1
+          )
+
           if [ -n "$DTBO_PATH" ]; then
-            cp -f "$DTBO_PATH" "$GITHUB_WORKSPACE/prebuilt_kernel/dtbo.img"
+            cp -f \
+              "$DTBO_PATH" \
+              "$GITHUB_WORKSPACE/prebuilt_kernel/dtbo.img"
           fi
 
       # ============================================================
-      # 10. 发布预编译镜像至 Release 标签 (prebuilt-latest)
+      # 12. Upload diagnostics
       # ============================================================
-      - name: 发布预编译镜像至 Release 标签 (prebuilt-latest)
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "prebuilt-latest"
-          name: "预编译内核镜像 (Prebuilt Kernel Image)"
-          body: "供 AnyKernel3 极速打包使用的最新预编译 Image.lz4 镜像。"
-          files: prebuilt_kernel/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ============================================================
-      # 11. 无论成功与否，均打包上传完整 build.log 诊断日志
-      # ============================================================
-      - name: 打包上传诊断日志 (build.log)
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-diagnostics-log
-          path: build.log
+          name: S22U-Kernel-Build-Diagnostics
+          path: |
+            build.log
+            resource.log
           if-no-files-found: warn
+
+      # ============================================================
+      # 13. Upload kernel artifact
+      # ============================================================
+      - name: Upload kernel artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: S22U-Kernel-Image
+          path: |
+            prebuilt_kernel/*
+          if-no-files-found: warn
+
+      # ============================================================
+      # 14. Release
+      # ============================================================
+      - name: Publish prebuilt kernel
+        if: success() && hashFiles('prebuilt_kernel/*') != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-latest
+          name: S22 Ultra KernelSU Prebuilt
+          body: |
+            Samsung Galaxy S22 Ultra SM-S9080
+            Snapdragon 8 Gen 1 / SM8450 / Waipio
+            GKI + KernelSU
+          files: |
+            prebuilt_kernel/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -38,16 +38,32 @@ jobs:
             rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
 
       # ============================================================
-      # 2.5 创建 12GB Swap
+      # 2.5 安全创建 12GB Swap (彻底解决 Text file busy)
       # ============================================================
       - name: 创建 12GB Swap
         shell: bash
         run: |
           set -e
-          sudo fallocate -l 12G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          echo "===== 准备清理并重新创建 Swap ====="
+          free -h
+
+          # 1. 彻底关闭系统当前占用的所有 Swap
+          sudo swapoff -a || true
+
+          # 2. 清理旧的 Swap 文件
+          sudo rm -f /swapfile /mnt/swapfile /swapfile_12g || true
+
+          # 3. 创建全新的 12GB Swap 文件
+          SWAPFILE="/swapfile_12g"
+          echo "正在分配 12GB Swap 空间..."
+          sudo fallocate -l 12G "$SWAPFILE" || sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=12288
+
+          # 4. 赋予权限与启用
+          sudo chmod 600 "$SWAPFILE"
+          sudo mkswap "$SWAPFILE"
+          sudo swapon "$SWAPFILE"
+
+          echo "===== Swap 扩展成功 ====="
           free -h
 
       # ============================================================

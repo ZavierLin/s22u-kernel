@@ -1,4 +1,4 @@
-name: 1-编译内核核心产物 (Phase A)
+name: build-kernel (Phase A)
 
 on:
   workflow_dispatch:
@@ -38,7 +38,7 @@ jobs:
             rsync cpio unzip zip wget curl git file xz-utils lz4 device-tree-compiler
 
       # ============================================================
-      # 2.5 安全创建 12GB Swap (彻底解决 Text file busy)
+      # 2.5 创建 12GB Swap
       # ============================================================
       - name: 创建 12GB Swap
         shell: bash
@@ -47,18 +47,13 @@ jobs:
           echo "===== 准备清理并重新创建 Swap ====="
           free -h
 
-          # 1. 彻底关闭系统当前占用的所有 Swap
           sudo swapoff -a || true
-
-          # 2. 清理旧的 Swap 文件
           sudo rm -f /swapfile /mnt/swapfile /swapfile_12g || true
 
-          # 3. 创建全新的 12GB Swap 文件
           SWAPFILE="/swapfile_12g"
           echo "正在分配 12GB Swap 空间..."
           sudo fallocate -l 12G "$SWAPFILE" || sudo dd if=/dev/zero of="$SWAPFILE" bs=1M count=12288
 
-          # 4. 赋予权限与启用
           sudo chmod 600 "$SWAPFILE"
           sudo mkswap "$SWAPFILE"
           sudo swapon "$SWAPFILE"
@@ -100,7 +95,7 @@ jobs:
           rm -rf clang-repo
 
       # ============================================================
-      # 6. 全量补齐 build-tools 与 AOSP 官方脚本 (Base64 防 404)
+      # 6. 全量补齐 build-tools 与 AOSP 脚本
       # ============================================================
       - name: 全量补齐 build-tools 与 AOSP 脚本
         shell: bash
@@ -116,7 +111,7 @@ jobs:
 
           for dir in /usr/bin /bin; do
             for file in "$dir"/*; do
-              if [ -x "$file" ] && [ -f "$file" ]; then
+              if [ -x "$file" ] && [ -f "$file" ]; me
                 cmd=$(basename "$file")
                 ln -sf "$file" "$TOOLS/$cmd"
               fi
@@ -125,12 +120,10 @@ jobs:
 
           ln -sf /usr/bin/python3 "$TOOLS/python"
 
-          # 1. 补齐 ufdt_apply_overlay
           UFDT_BIN="$TOOLS/ufdt_apply_overlay"
           printf '#!/bin/sh\nexit 0\n' > "$UFDT_BIN"
           chmod +x "$UFDT_BIN"
 
-          # 2. 补齐 mkdtboimg.py (通过 Googlesource 官方源 Base64 解码，防 404)
           MKDTBO_BIN="$TOOLS/mkdtboimg.py"
           rm -f "$MKDTBO_BIN"
 
@@ -143,21 +136,27 @@ jobs:
           fi
           chmod +x "$MKDTBO_BIN"
 
-          # 3. 验证关键工具
-          echo "===== 验证补齐工具 ====="
-          ls -l "$TOOLS/python"
-          ls -l "$TOOLS/ufdt_apply_overlay"
-          ls -l "$TOOLS/mkdtboimg.py"
-
       # ============================================================
-      # 7. 集成 KernelSU
+      # 7. 双重注入 KernelSU 至 common 和 msm-kernel 源码树
       # ============================================================
       - name: 集成 KernelSU
         shell: bash
         run: |
           set -e
-          cd "$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
-          curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
+          
+          # 1. 优先注入 GKI 主源码树 (common)
+          if [ -d "$GITHUB_WORKSPACE/kernel_platform/common" ]; then
+            echo "正在注入 KernelSU 至 common 源码树..."
+            cd "$GITHUB_WORKSPACE/kernel_platform/common"
+            curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
+          fi
+
+          # 2. 注入 Vendor 源码树 (msm-kernel)
+          if [ -d "$GITHUB_WORKSPACE/kernel_platform/msm-kernel" ]; then
+            echo "正在注入 KernelSU 至 msm-kernel 源码树..."
+            cd "$GITHUB_WORKSPACE/kernel_platform/msm-kernel"
+            curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
+          fi
 
       # ============================================================
       # 8. 执行三星 GKI 编译
@@ -177,6 +176,7 @@ jobs:
       # 9. 提取预编译镜像 (Image.lz4)
       # ============================================================
       - name: 提取预编译镜像 (Image.lz4)
+        if: success()
         shell: bash
         run: |
           set -e
@@ -199,6 +199,7 @@ jobs:
       # 10. 发布预编译镜像至 Release 标签 (prebuilt-latest)
       # ============================================================
       - name: 发布预编译镜像至 Release 标签 (prebuilt-latest)
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "prebuilt-latest"
@@ -207,3 +208,14 @@ jobs:
           files: prebuilt_kernel/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ============================================================
+      # 11. 无论成功与否，均打包上传完整 build.log 诊断日志
+      # ============================================================
+      - name: 打包上传诊断日志 (build.log)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics-log
+          path: build.log
+          if-no-files-found: warn
